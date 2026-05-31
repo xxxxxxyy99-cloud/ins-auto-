@@ -185,6 +185,8 @@ if not st.session_state.authenticated:
                         st.session_state.ig_username = u
                         st.session_state.ig_sessionid = s.strip()
                         st.session_state.authenticated = True
+                        # Persist to DB so scheduler can use it
+                        save_settings(ig_sessionid=s.strip())
                         st.rerun()
                 except Exception as e:
                     st.error(f"登录失败: {e}")

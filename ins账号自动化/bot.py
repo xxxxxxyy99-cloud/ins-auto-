@@ -40,8 +40,9 @@ def _save_sessionid_to_db(sessionid: str):
     try:
         from .db import settings_set
         settings_set(ig_sessionid=sessionid)
-    except Exception:
-        pass
+        print(f"  SessionID persisted to DB ({len(sessionid)} chars)")
+    except Exception as e:
+        print(f"  WARNING: Failed to persist sessionid: {e}")
 
 
 def _create_client() -> Client:
