@@ -1,14 +1,57 @@
-"""Instagram login, session management, and posting via instagrapi."""
+"""Instagram login, session management, and posting via Playwright."""
 
 import time
 import random
-from instagrapi import Client
+import json
+from pathlib import Path
+from playwright.sync_api import sync_playwright, Page, Browser, BrowserContext
 from .config import IG_USERNAME, IG_PASSWORD
 from .db import DATA_DIR
 
 SESSION_FILE = DATA_DIR / "ig_session.json"
-_cl: Client | None = None
 
+
+# ═══════════════════════════════════════════════════════════
+#  InstaClient — thin wrapper around Playwright browser
+# ═══════════════════════════════════════════════════════════
+
+class InstaClient:
+    """Wraps Playwright browser + page for Instagram automation."""
+
+    def __init__(self, browser: Browser | BrowserContext, context: BrowserContext, page: Page):
+        self.browser = browser
+        self.context = context
+        self.page = page
+        # For persistent context, browser and context are the same object
+        self._is_persistent = browser is context
+
+    def __bool__(self) -> bool:
+        return self.page is not None and not self.page.is_closed()
+
+    def close(self):
+        try:
+            self.page.close()
+        except Exception:
+            pass
+        # For persistent context, close the context (which is also the browser)
+        try:
+            self.context.close()
+        except Exception:
+            pass
+        # Only close browser if it's separate from context
+        if not self._is_persistent:
+            try:
+                self.browser.close()
+            except Exception:
+                pass
+
+
+_cl: InstaClient | None = None
+
+
+# ═══════════════════════════════════════════════════════════
+#  Helpers
+# ═══════════════════════════════════════════════════════════
 
 def _jitter(base: float, pct: float = 0.3) -> float:
     """Add random jitter to a delay to appear more human."""
@@ -20,6 +63,12 @@ def _human_delay(label: str = "", min_s: float = 1, max_s: float = 4):
     delay = random.uniform(min_s, max_s)
     print(f"  [{label}] waiting {delay:.1f}s...")
     time.sleep(delay)
+
+
+def _human_type(page: Page, selector: str, text: str):
+    """Type text one character at a time like a human."""
+    for ch in text:
+        page.type(selector, ch, delay=random.randint(50, 200))
 
 
 def _get_stored_sessionid() -> str | None:
@@ -45,166 +94,206 @@ def _save_sessionid_to_db(sessionid: str):
         print(f"  WARNING: Failed to persist sessionid: {e}")
 
 
-def _create_client() -> Client:
-    """Create client with randomized device profile to avoid fingerprinting."""
-    c = Client()
+# ═══════════════════════════════════════════════════════════
+#  Login
+# ═══════════════════════════════════════════════════════════
 
-    # Rotate user agents
-    agents = [
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UQ1A.240205.004; wv) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/122.0.6261.64 Mobile Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 14; SM-S928B Build/UP1A.231005.007; wv) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/124.0.6367.82 Mobile Safari/537.36",
-        "Mozilla/5.0 (Linux; Android 14; Pixel 7 Build/UQ1A.240205.002; wv) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/121.0.6167.143 Mobile Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-    ]
-    c.set_user_agent(random.choice(agents))
+MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UQ1A.240205.004; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/122.0.6261.64 "
+    "Mobile Safari/537.36"
+)
 
-    # Vary device slightly
-    devices = [
-        {"manufacturer": "Google", "model": "Pixel 8 Pro",
-         "android_version": 34, "android_release": "14.0",
-         "dpi": "420dpi", "resolution": "1080x1920", "chipset": "qcom"},
-        {"manufacturer": "Samsung", "model": "SM-S928B",
-         "android_version": 34, "android_release": "14.0",
-         "dpi": "480dpi", "resolution": "1440x3120", "chipset": "qcom"},
-        {"manufacturer": "Google", "model": "Pixel 7",
-         "android_version": 34, "android_release": "14.0",
-         "dpi": "412dpi", "resolution": "1080x2400", "chipset": "qcom"},
-    ]
-    c.set_device(random.choice(devices))
-
-    return c
+INSTAGRAM_URL = "https://www.instagram.com"
 
 
-def login(username: str | None = None, password: str | None = None, sessionid: str | None = None) -> Client:
+def _is_logged_in(page: Page) -> bool:
+    """Check if the current page is logged into Instagram."""
+    try:
+        has_create = page.query_selector('svg[aria-label="New post"]') is not None
+        has_home = page.query_selector('svg[aria-label="Home"]') is not None
+        on_login = page.query_selector('input[name="username"]') is not None
+        return (has_create or has_home) and not on_login
+    except Exception:
+        return False
+
+
+def _click_if_exists(page: Page, selector: str, timeout: int = 3000):
+    """Click an element if it appears within timeout, silently skip if not."""
+    try:
+        el = page.wait_for_selector(selector, timeout=timeout)
+        if el and el.is_visible():
+            el.click()
+            _human_delay("click", 0.5, 1.5)
+    except Exception:
+        pass
+
+
+def _get_text(page: Page, selector: str) -> str | None:
+    """Get text content of an element if it exists."""
+    try:
+        el = page.query_selector(selector)
+        if el:
+            return el.text_content()
+    except Exception:
+        pass
+    return None
+
+
+def login(
+    username: str | None = None,
+    password: str | None = None,
+    sessionid: str | None = None,
+) -> InstaClient:
+    """
+    Login to Instagram via Playwright browser.
+
+    Routes (in priority order):
+      A. Saved Playwright session file  → restore cookies, verify
+      B. Username + password            → fill login form, submit
+      C. No credentials                 → raise error
+    """
     global _cl
+
     user = username or IG_USERNAME
     pwd = password or IG_PASSWORD
 
-    if not sessionid:
-        sessionid = _get_stored_sessionid()
-
-    # ── Route A: sessionid login ──
-    if sessionid:
-        raw = sessionid.strip()
-        if raw.startswith("sessionid="):
-            raw = raw[len("sessionid="):]
-        from urllib.parse import unquote
-        raw = unquote(raw)
-        c = _create_client()
-        print("Logging in with sessionid...")
+    # Close any existing client
+    if _cl is not None:
         try:
-            c.login_by_sessionid(raw)
-            _human_delay("login", 2, 5)
-            c.dump_settings(str(SESSION_FILE))
-            _save_sessionid_to_db(sessionid.strip())
-            _cl = c
-            print(f"Logged in as @{user}")
-            return _cl
-        except Exception as e:
-            raise Exception(
-                f"SessionID 登录失败: {e}\n\n"
-                "可能是 sessionid 已过期，请重新获取:\n"
-                "1. 用 Chrome/Edge 打开 Instagram.com 并登录\n"
-                "2. 按 F12 → Application → Cookies → instagram.com\n"
-                "3. 找到 sessionid，复制完整值粘贴到输入框"
-            )
+            _cl.close()
+        except Exception:
+            pass
+        _cl = None
 
-    c = _create_client()
+    pw = sync_playwright().start()
+    browser_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+    ]
 
-    # ── Route B: saved session ──
+    # ── Route A: restore saved session ──
     if SESSION_FILE.exists():
+        print("Restoring saved session...")
         try:
-            c.load_settings(str(SESSION_FILE))
-            c.login(user, pwd)
-            _human_delay("session_load", 2, 4)
-            c.get_timeline_feed()
-            _cl = c
-            print(f"Logged in with saved session: @{user}")
-            return _cl
+            browser = pw.chromium.launch_persistent_context(
+                user_data_dir=str(DATA_DIR / "browser_profile"),
+                headless=False,
+                args=browser_args,
+                user_agent=MOBILE_USER_AGENT,
+                viewport={"width": 412, "height": 915},
+                device_scale_factor=2,
+                storage_state=str(SESSION_FILE),
+            )
+            page = browser.new_page()
+            page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=30000)
+            _human_delay("page_load", 2, 4)
+
+            if _is_logged_in(page):
+                # Persistent context wraps browser + context in one object
+                client = InstaClient(browser, browser, page)
+                _cl = client
+                print(f"Session restored — logged in as @{user}")
+                return client
+
+            print("Saved session expired, logging in fresh...")
+            browser.close()
         except Exception as e:
-            print(f"Saved session expired: {e}")
+            print(f"Session restore failed: {e}")
+            try:
+                browser.close()
+            except Exception:
+                pass
             SESSION_FILE.unlink(missing_ok=True)
-            c = _create_client()
 
-    # ── Route C: password login ──
-    if pwd and pwd != "your-instagram-password":
-        print("Logging in with password...")
-        try:
-            if username:
-                from . import config
-                config.IG_USERNAME = username
-            c.login(user, pwd)
-            _human_delay("pwd_login", 3, 6)
-            c.get_timeline_feed()
-            c.dump_settings(str(SESSION_FILE))
-            _cl = c
-            print(f"Logged in as @{user}")
-            return _cl
-        except Exception as e:
-            raise Exception(f"密码登录失败: {e}")
+    # ── Route B: username + password login ──
+    if not pwd or pwd == "your-instagram-password":
+        raise Exception(
+            "No saved session and no password configured.\n"
+            "请先通过 Streamlit 界面登录一次，或编辑 data/.env 设置 IG_USERNAME 和 IG_PASSWORD"
+        )
 
-    raise Exception(
-        "登录失败。请提供有效的 sessionid:\n"
-        "1. 用 Chrome/Edge 打开 Instagram.com 并登录\n"
-        "2. 按 F12 → Application → Cookies → instagram.com\n"
-        "3. 找到 sessionid，复制完整值粘贴到输入框"
+    # ── Manual login: open browser, user logs in themselves ──
+    print("Opening Instagram for manual login...")
+    print("Please log in yourself. The browser will stay open.")
+    print("When you see your Instagram feed, press Enter here to save session.")
+    print()
+
+    browser = pw.chromium.launch_persistent_context(
+        user_data_dir=str(DATA_DIR / "browser_profile"),
+        headless=False,
+        args=browser_args,
+        user_agent=MOBILE_USER_AGENT,
+        viewport={"width": 412, "height": 915},
+        device_scale_factor=2,
     )
+    page = browser.new_page()
+    page.goto(f"{INSTAGRAM_URL}/accounts/login/", wait_until="domcontentloaded", timeout=30000)
+
+    # Wait for user to complete login manually
+    try:
+        input(">>> Press Enter after you've logged in to Instagram... ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+    # Verify login succeeded
+    if not _is_logged_in(page):
+        browser.close()
+        raise Exception("Login not detected. Please try again.")
+
+    # Save session
+    browser.storage_state(path=str(SESSION_FILE))
+    print(f"Session saved to {SESSION_FILE.name}")
+    _save_sessionid_to_db(sessionid if sessionid else "")
+
+    client = InstaClient(browser, browser, page)
+    _cl = client
+    print(f"Logged in as @{user}")
+    return client
+
+
+# ═══════════════════════════════════════════════════════════
+#  Session management
+# ═══════════════════════════════════════════════════════════
 
 
 def _warmup_session():
     """Simulate human browsing before posting to avoid bot detection."""
     global _cl
-    if _cl is None:
+    if _cl is None or _cl.page.is_closed():
         return
-
-    actions = [
-        ("scroll_feed", lambda: _cl.get_timeline_feed()),
-        ("scroll_feed2", lambda: _cl.get_timeline_feed()),
-    ]
-    random.shuffle(actions)
-    for name, action in actions:
-        try:
-            _human_delay(name, random.uniform(2, 6))
-            action()
-        except Exception as e:
-            print(f"  Warmup {name} skipped: {e}")
+    try:
+        page = _cl.page
+        # Scroll feed a few times like a real user
+        for i in range(2):
+            _human_delay(f"scroll_{i}", random.uniform(2, 5))
+            page.evaluate("window.scrollBy(0, window.innerHeight)")
+            time.sleep(random.uniform(0.5, 1.5))
+    except Exception as e:
+        print(f"  Warmup skipped: {e}")
 
 
 def _reconnect() -> bool:
-    """Try to reconnect when session expires."""
-    sessionid = _get_stored_sessionid()
-    if sessionid:
-        print("Reconnecting with stored sessionid...")
-        try:
-            login(sessionid=sessionid)
-            return True
-        except Exception as e:
-            print(f"Sessionid reconnect failed: {e}")
-
-    pwd = IG_PASSWORD
-    if pwd and pwd != "your-instagram-password":
-        print("Reconnecting with password...")
-        try:
-            login(password=pwd)
-            return True
-        except Exception as e:
-            print(f"Password reconnect failed: {e}")
-
-    return False
+    """Try to restore saved session silently. No manual login."""
+    global _cl
+    if not SESSION_FILE.exists():
+        return False
+    print("Reconnecting from saved session...")
+    try:
+        login()  # Will use Route A (saved session) since SESSION_FILE exists
+        return _cl is not None and bool(_cl)
+    except Exception as e:
+        print(f"Silent reconnect failed: {e}")
+        return False
 
 
 def _session_healthy() -> bool:
-    """Check if current session is still valid."""
+    """Check if current session is still valid via Playwright page."""
     global _cl
-    if _cl is None:
+    if _cl is None or _cl.page.is_closed():
         return False
     try:
-        _cl.get_timeline_feed()
-        return True
+        return _is_logged_in(_cl.page)
     except Exception:
         return False
 

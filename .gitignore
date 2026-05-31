@@ -11,6 +11,13 @@
 # Session file
 ig_session.json
 
+# Playwright browser profile (contains cookies, sessions)
+browser_profile/
+
+# Debug artifacts
+debug_*.png
+debug_*.html
+
 # Generated images
 generated_images/
 
