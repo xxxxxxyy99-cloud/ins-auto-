@@ -302,7 +302,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Scheduler status ──
     status = get_status()
     is_run = status.get("running", False)
     sched = get_schedule()
@@ -310,18 +309,26 @@ with st.sidebar:
 
     st.markdown(f"""
     <div style="display:flex;align-items:center;gap:0.5rem;padding:0.5rem 0;">
-        <span class="badge badge-{'success' if is_run else 'warning'}">{'▶ 调度器运行中' if is_run else '⏸ 调度器已停'}</span>
+        <span class="badge badge-{'success' if is_run else 'warning'}">{'▶ 运行中' if is_run else '⏸ 已停止'}</span>
     </div>
     """, unsafe_allow_html=True)
 
     if next_post:
         try:
             dt = datetime.fromisoformat(next_post)
-            st.caption(f"⏰ 下次发布: {dt.strftime('%m-%d %H:%M')}")
+            st.caption(f"⏰ 下次: {dt.strftime('%m-%d %H:%M')}")
         except Exception:
             pass
 
-    st.info("💡 请运行 **启动调度器.bat** 来启动后台自动发布")
+    if is_run:
+        if st.button("⏹ 停止", use_container_width=True):
+            set_running(False)
+            log.info("stop", message="手动停止")
+            st.rerun()
+    else:
+        if st.button("▶ 启动自动化", use_container_width=True, type="primary"):
+            _start_auto()
+            st.rerun()
 
     st.divider()
 
