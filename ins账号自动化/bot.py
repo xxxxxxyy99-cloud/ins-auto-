@@ -299,6 +299,7 @@ def _session_healthy() -> bool:
 
 
 def post_photo(image_path: str, caption: str) -> bool:
+    """Upload a photo to Instagram and publish it via Playwright browser."""
     global _cl
     if _cl is None:
         print("Not logged in, cannot post")
@@ -314,39 +315,162 @@ def post_photo(image_path: str, caption: str) -> bool:
                     time.sleep(_jitter(60, 0.3))
                     continue
 
-            # Human warmup before posting
+            page = _cl.page
+
+            # Warmup: scroll feed to appear human
             _warmup_session()
 
-            # Random delay before clicking "post"
-            _human_delay("pre_post", random.uniform(3, 8))
+            # ── Step 1: Click "New post" button ──
+            _human_delay("pre_new_post", random.uniform(2, 5))
+            new_post_selectors = [
+                'svg[aria-label="New post"]',
+                'svg[aria-label="New Post"]',
+                'span:has-text("Create")',
+                'div[role="menuitem"]:has-text("Post")',
+            ]
+            clicked = False
+            for sel in new_post_selectors:
+                try:
+                    el = page.wait_for_selector(sel, timeout=5000)
+                    if el and el.is_visible():
+                        el.click()
+                        clicked = True
+                        print(f"  Clicked new post: {sel}")
+                        break
+                except Exception:
+                    continue
 
-            result = _cl.photo_upload(image_path, caption)
-            print(f"Posted: {image_path}")
+            if not clicked:
+                # Fallback: navigate directly to create page
+                print("  New post button not found, navigating directly...")
+                page.goto(f"{INSTAGRAM_URL}/create/details/", wait_until="domcontentloaded", timeout=15000)
 
-            # Cool-down after posting
-            _human_delay("cooldown", random.uniform(5, 15))
+            _human_delay("after_new_post", 2, 4)
 
-            return bool(result)
+            # ── Step 2: Upload image file ──
+            file_input = page.wait_for_selector('input[type="file"]', timeout=15000)
+            file_input.set_input_files(image_path)
+            print(f"  Uploaded: {image_path}")
+            _human_delay("after_upload", 3, 6)
+
+            # ── Step 3: Click "Next" through edit screens ──
+            for step_label in ["crop", "filter"]:
+                _human_delay(f"{step_label}_screen", 1, 2)
+                next_clicked = False
+                for sel in [
+                    'div[role="button"]:has-text("Next")',
+                    'button:has-text("Next")',
+                    'div[role="button"]:has-text("次へ")',
+                    '[aria-label="Next"]',
+                ]:
+                    try:
+                        btn = page.wait_for_selector(sel, timeout=8000)
+                        if btn and btn.is_visible():
+                            btn.click()
+                            next_clicked = True
+                            print(f"  Clicked Next ({step_label})")
+                            break
+                    except Exception:
+                        continue
+                if not next_clicked:
+                    print(f"  Next button not found on {step_label} screen (may be skipped)")
+
+            # ── Step 4: Type caption ──
+            _human_delay("caption_screen", 2, 4)
+            caption_selectors = [
+                'textarea[aria-label="Write a caption..."]',
+                'textarea[placeholder="Write a caption..."]',
+                'textarea[aria-label="キャプションを入力..."]',
+                'div[role="textbox"]',
+            ]
+            caption_box = None
+            for sel in caption_selectors:
+                try:
+                    caption_box = page.wait_for_selector(sel, timeout=8000)
+                    if caption_box:
+                        print(f"  Found caption input: {sel}")
+                        break
+                except Exception:
+                    continue
+
+            if caption_box:
+                caption_box.click()
+                _human_delay("focus_caption", 0.5, 1.5)
+                # Type caption with human-like speed
+                for ch in caption:
+                    caption_box.type(ch, delay=random.randint(60, 180))
+                print(f"  Caption typed ({len(caption)} chars)")
+            else:
+                print("  WARNING: Caption box not found, posting without caption")
+
+            _human_delay("before_share", 2, 4)
+
+            # ── Step 5: Click Share ──
+            share_clicked = False
+            for sel in [
+                'div[role="button"]:has-text("Share")',
+                'button:has-text("Share")',
+                'div[role="button"]:has-text("共有")',
+                '[aria-label="Share"]',
+            ]:
+                try:
+                    btn = page.wait_for_selector(sel, timeout=5000)
+                    if btn and btn.is_visible() and btn.is_enabled():
+                        btn.click()
+                        share_clicked = True
+                        print(f"  Clicked Share: {sel}")
+                        break
+                except Exception:
+                    continue
+
+            if not share_clicked:
+                raise Exception("Share button not found or not clickable")
+
+            # ── Step 6: Wait for post to complete ──
+            print("  Waiting for post to complete...")
+            _human_delay("posting", 5, 10)
+
+            # Verify: wait for "Post shared" or redirect away from create page
+            try:
+                page.wait_for_url(f"{INSTAGRAM_URL}/**", timeout=30000)
+            except Exception:
+                pass  # URL might not change
+
+            # Check we're not still on the create/share page
+            still_creating = page.query_selector('div[role="button"]:has-text("Share")')
+            if still_creating and still_creating.is_visible():
+                # Maybe the post needs one more click
+                _human_delay("retry_share", 2, 3)
+                try:
+                    still_creating.click()
+                    _human_delay("posting2", 5, 10)
+                except Exception:
+                    pass
+
+            print(f"  Posted: {Path(image_path).name}")
+
+            # ── Step 7: Cooldown ──
+            _human_delay("cooldown", random.uniform(8, 20))
+
+            return True
 
         except Exception as e:
             err = str(e)
 
-            if "feedback_required" in err:
-                # Heavy rate limit — wait a long time
+            if "feedback_required" in err or "rate" in err.lower():
                 wait_minutes = random.randint(30, 120)
-                print(f"  Rate limited! Waiting {wait_minutes} minutes...")
+                print(f"  Rate limited! Waiting {wait_minutes} min...")
                 time.sleep(wait_minutes * 60)
-                SESSION_FILE.unlink(missing_ok=True)
                 continue
 
-            if "login_required" in err:
+            if "login_required" in err or "login" in err.lower():
                 print(f"  Session expired (attempt {attempt+1}/3): {err[:80]}")
                 SESSION_FILE.unlink(missing_ok=True)
                 time.sleep(_jitter(10 * (attempt + 1), 0.5))
                 continue
 
-            if "challenge_required" in err:
-                print(f"  Challenge required — account needs manual verification: {err[:100]}")
+            if "challenge" in err.lower() or "checkpoint" in err.lower():
+                print(f"  Challenge required: {err[:100]}")
                 return False
 
             print(f"  Post failed: {err[:120]}")
@@ -356,19 +480,68 @@ def post_photo(image_path: str, caption: str) -> bool:
 
 
 def post_carousel(image_paths: list[str], caption: str) -> bool:
+    """Upload multiple images as a carousel post."""
     global _cl
     if _cl is None:
         print("Not logged in, cannot post")
         return False
 
+    page = _cl.page
     _warmup_session()
     _human_delay("pre_carousel", random.uniform(5, 10))
 
     try:
-        result = _cl.album_upload(image_paths, caption)
-        print(f"Carousel posted with {len(image_paths)} images")
+        # Click new post
+        new_btn = page.wait_for_selector('svg[aria-label="New post"]', timeout=10000)
+        new_btn.click()
+        _human_delay("after_new_post", 2, 4)
+
+        # Upload all images
+        file_input = page.wait_for_selector('input[type="file"]', timeout=15000)
+        file_input.set_input_files(image_paths)
+        print(f"  Uploaded {len(image_paths)} images")
+        _human_delay("after_upload_multi", 4, 8)
+
+        # Click through edit screens
+        for step_label in ["crop", "filter", "arrange"]:
+            _human_delay(f"{step_label}_screen", 1, 2)
+            for sel in ['div[role="button"]:has-text("Next")', 'button:has-text("Next")']:
+                try:
+                    btn = page.wait_for_selector(sel, timeout=8000)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        print(f"  Clicked Next ({step_label})")
+                        break
+                except Exception:
+                    continue
+
+        # Caption
+        _human_delay("caption_screen", 2, 4)
+        caption_box = page.wait_for_selector('textarea[aria-label="Write a caption..."]', timeout=10000)
+        if caption_box:
+            caption_box.click()
+            for ch in caption:
+                caption_box.type(ch, delay=random.randint(60, 180))
+            print(f"  Caption typed ({len(caption)} chars)")
+
+        _human_delay("before_share", 2, 4)
+
+        # Share
+        for sel in ['div[role="button"]:has-text("Share")', 'button:has-text("Share")']:
+            try:
+                btn = page.wait_for_selector(sel, timeout=5000)
+                if btn and btn.is_visible():
+                    btn.click()
+                    print(f"  Clicked Share")
+                    break
+            except Exception:
+                continue
+
+        _human_delay("posting", 5, 10)
         _human_delay("cooldown", random.uniform(8, 20))
-        return bool(result)
+        print(f"  Carousel posted: {len(image_paths)} images")
+        return True
+
     except Exception as e:
-        print(f"Carousel failed: {e}")
+        print(f"  Carousel failed: {e}")
         return False
