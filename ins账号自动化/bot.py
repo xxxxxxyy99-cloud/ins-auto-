@@ -351,78 +351,56 @@ def post_photo(image_path: str, caption: str) -> bool:
             # Warmup: scroll feed to appear human
             _warmup_session()
 
-            # ── Step 1: Click "New post" button ──
+            # ── Step 1-2: Click "New post" → handle menu → upload file ──
             _human_delay("pre_new_post", random.uniform(2, 5))
-            new_post_selectors = [
-                'svg[aria-label="New post"]',
-                'svg[aria-label="New Post"]',
-                'svg[aria-label="加号图标"]',
-                'svg[aria-label="新規投稿"]',
-                'span:has-text("Create")',
-                'div[role="menuitem"]:has-text("Post")',
-            ]
-            clicked = False
-            for sel in new_post_selectors:
-                try:
-                    el = page.wait_for_selector(sel, timeout=5000)
-                    if el and el.is_visible():
-                        el.click()
-                        clicked = True
-                        print(f"  Clicked new post: {sel}")
-                        break
-                except Exception:
-                    continue
 
-            if not clicked:
-                # Fallback: navigate directly to create page
-                print("  New post button not found, navigating directly...")
-                page.goto(f"{INSTAGRAM_URL}/create/details/", wait_until="domcontentloaded", timeout=15000)
-
-            _human_delay("after_new_post", 2, 4)
-
-            # ── Step 1b: If a create menu opens, click "Post" option ──
-            for menu_sel in [
-                'div[role="dialog"] div[role="button"]:has-text("Post")',
-                'div[role="dialog"] div[role="button"]:has-text("帖子")',
-                'span:has-text("Post"):not(:has-text("New"))',
-                'div[role="menuitem"]:has-text("Post")',
-                'div[role="menuitem"]:has-text("帖子")',
+            new_post_sel = None
+            for sel in [
+                'svg[aria-label="New post"]', 'svg[aria-label="New Post"]',
+                'svg[aria-label="加号图标"]', 'svg[aria-label="新規投稿"]',
             ]:
-                try:
-                    menu_btn = page.wait_for_selector(menu_sel, timeout=3000)
-                    if menu_btn and menu_btn.is_visible():
-                        menu_btn.click()
-                        print(f"  Selected Post from menu: {menu_sel}")
-                        _human_delay("after_menu_select", 1, 2)
-                        break
-                except Exception:
-                    continue
+                el = page.query_selector(sel)
+                if el:
+                    new_post_sel = sel
+                    break
 
-            # ── Step 2: Upload image file ──
-            # Instagram's file input can be tricky — try multiple approaches
-            file_input = None
-            for file_sel in ['input[type="file"]', 'input[accept*="image"]']:
-                try:
-                    file_input = page.wait_for_selector(file_sel, timeout=5000)
-                    if file_input:
-                        break
-                except Exception:
-                    continue
+            if not new_post_sel:
+                raise Exception("New post button not found")
 
-            if file_input:
-                file_input.set_input_files(image_path)
+            # Set up file chooser BEFORE clicking the button
+            try:
+                with page.expect_file_chooser(timeout=30000) as fc:
+                    page.click(new_post_sel)
+                    print(f"  Clicked {new_post_sel}, waiting for file chooser...")
+
+                    # Maybe a menu appeared instead of file chooser
+                    _human_delay("check_menu", 1, 2)
+                    post_menu_sel = None
+                    for ms in [
+                        'div[role="dialog"] div[role="button"]:has-text("Post")',
+                        'div[role="dialog"] div[role="button"]:has-text("帖子")',
+                    ]:
+                        mb = page.query_selector(ms)
+                        if mb and mb.is_visible():
+                            post_menu_sel = ms
+                            break
+
+                    if post_menu_sel:
+                        print(f"  Create menu appeared, clicking {post_menu_sel}")
+                        page.click(post_menu_sel)
+
+                fc.value.set_files(image_path)
                 print(f"  Uploaded: {image_path}")
-            else:
-                # Last resort: try to invoke file chooser
-                print("  Trying file chooser...")
-                try:
-                    with page.expect_file_chooser(timeout=5000) as fc_info:
-                        # Click something that might trigger file picker
-                        page.click('div[role="dialog"] div[role="button"]:first-child')
-                    fc_info.value.set_files(image_path)
-                    print(f"  Uploaded via file chooser: {image_path}")
-                except Exception as e:
-                    raise Exception(f"Cannot upload file. Instagram UI may have changed. {e}")
+            except Exception as e:
+                # Fallback: hidden input
+                print(f"  File chooser failed ({e}), trying hidden input...")
+                fi = page.locator('input[type="file"]')
+                if fi.count() > 0:
+                    fi.first.set_input_files(image_path)
+                    print(f"  Uploaded via hidden input: {image_path}")
+                else:
+                    page.screenshot(path=str(DATA_DIR / "debug_upload_fail.png"))
+                    raise Exception("Cannot upload file — no file chooser or input found")
 
             _human_delay("after_upload", 3, 6)
 
