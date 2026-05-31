@@ -13,7 +13,7 @@ from .db import (
     # Analytics
     analytics_totals, analytics_overview, increment_generated, increment_posted,
     # Activity log
-    get_recent_activity,
+    get_recent_activity, get_schedule,
 )
 
 from .content import (
