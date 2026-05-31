@@ -380,10 +380,50 @@ def post_photo(image_path: str, caption: str) -> bool:
 
             _human_delay("after_new_post", 2, 4)
 
+            # ── Step 1b: If a create menu opens, click "Post" option ──
+            for menu_sel in [
+                'div[role="dialog"] div[role="button"]:has-text("Post")',
+                'div[role="dialog"] div[role="button"]:has-text("帖子")',
+                'span:has-text("Post"):not(:has-text("New"))',
+                'div[role="menuitem"]:has-text("Post")',
+                'div[role="menuitem"]:has-text("帖子")',
+            ]:
+                try:
+                    menu_btn = page.wait_for_selector(menu_sel, timeout=3000)
+                    if menu_btn and menu_btn.is_visible():
+                        menu_btn.click()
+                        print(f"  Selected Post from menu: {menu_sel}")
+                        _human_delay("after_menu_select", 1, 2)
+                        break
+                except Exception:
+                    continue
+
             # ── Step 2: Upload image file ──
-            file_input = page.wait_for_selector('input[type="file"]', timeout=15000)
-            file_input.set_input_files(image_path)
-            print(f"  Uploaded: {image_path}")
+            # Instagram's file input can be tricky — try multiple approaches
+            file_input = None
+            for file_sel in ['input[type="file"]', 'input[accept*="image"]']:
+                try:
+                    file_input = page.wait_for_selector(file_sel, timeout=5000)
+                    if file_input:
+                        break
+                except Exception:
+                    continue
+
+            if file_input:
+                file_input.set_input_files(image_path)
+                print(f"  Uploaded: {image_path}")
+            else:
+                # Last resort: try to invoke file chooser
+                print("  Trying file chooser...")
+                try:
+                    with page.expect_file_chooser(timeout=5000) as fc_info:
+                        # Click something that might trigger file picker
+                        page.click('div[role="dialog"] div[role="button"]:first-child')
+                    fc_info.value.set_files(image_path)
+                    print(f"  Uploaded via file chooser: {image_path}")
+                except Exception as e:
+                    raise Exception(f"Cannot upload file. Instagram UI may have changed. {e}")
+
             _human_delay("after_upload", 3, 6)
 
             # ── Step 3: Click "Next" through edit screens ──
