@@ -108,12 +108,25 @@ INSTAGRAM_URL = "https://www.instagram.com"
 
 
 def _is_logged_in(page: Page) -> bool:
-    """Check if the current page is logged into Instagram."""
+    """Check if the current page is logged into Instagram (language-agnostic)."""
     try:
-        has_create = page.query_selector('svg[aria-label="New post"]') is not None
-        has_home = page.query_selector('svg[aria-label="Home"]') is not None
+        # Get all SVG aria-labels — Instagram nav only appears when logged in
+        svgs = page.query_selector_all('svg[aria-label]')
+        labels = [s.get_attribute('aria-label') for s in svgs if s.get_attribute('aria-label')]
+
+        # Instagram logged-in nav has these icons (in any language)
+        nav_markers = {'Home', 'New post', 'Reels', 'Messages', 'Search',
+                       '首页', '加号图标', '探索', '消息', '通知',
+                       'ホーム', '新規投稿', '検索', 'メッセージ',
+                       'Inicio', 'Nueva publicacion', 'Explorar', 'Mensajes',
+                       'Accueil', 'Nouvelle publication', 'Explorer', 'Messages'}
+
+        has_nav = bool(set(labels) & nav_markers)
+
+        # Not logged in if username/password inputs are visible
         on_login = page.query_selector('input[name="username"]') is not None
-        return (has_create or has_home) and not on_login
+
+        return has_nav and not on_login
     except Exception:
         return False
 
@@ -236,10 +249,28 @@ def login(
     except (EOFError, KeyboardInterrupt):
         pass
 
+    # Debug: dump page state
+    print(f"  URL: {page.url}")
+    print(f"  Title: {page.title()}")
+    svgs = page.query_selector_all('svg[aria-label]')
+    labels = [s.get_attribute('aria-label') for s in svgs if s.get_attribute('aria-label')]
+    print(f"  SVG aria-labels: {labels}")
+    alt_svgs = page.query_selector_all('svg')
+    print(f"  Total SVGs: {len(alt_svgs)}")
+    # Check for any role="link" or nav items
+    nav_items = page.query_selector_all('nav a, nav span, [role="navigation"] a')
+    print(f"  Nav items: {len(nav_items)}")
+    page.screenshot(path=str(DATA_DIR / "login_debug.png"))
+    print(f"  Debug screenshot saved")
+
     # Verify login succeeded
     if not _is_logged_in(page):
         browser.close()
-        raise Exception("Login not detected. Please try again.")
+        raise Exception(
+            "Login not detected. The page may not be fully loaded or "
+            "Instagram's UI has changed. Check the screenshot at "
+            f"{DATA_DIR / 'login_debug.png'}"
+        )
 
     # Save session
     browser.storage_state(path=str(SESSION_FILE))
@@ -325,6 +356,8 @@ def post_photo(image_path: str, caption: str) -> bool:
             new_post_selectors = [
                 'svg[aria-label="New post"]',
                 'svg[aria-label="New Post"]',
+                'svg[aria-label="加号图标"]',
+                'svg[aria-label="新規投稿"]',
                 'span:has-text("Create")',
                 'div[role="menuitem"]:has-text("Post")',
             ]
@@ -360,6 +393,7 @@ def post_photo(image_path: str, caption: str) -> bool:
                 for sel in [
                     'div[role="button"]:has-text("Next")',
                     'button:has-text("Next")',
+                    'div[role="button"]:has-text("下一步")',
                     'div[role="button"]:has-text("次へ")',
                     '[aria-label="Next"]',
                 ]:
@@ -381,6 +415,7 @@ def post_photo(image_path: str, caption: str) -> bool:
                 'textarea[aria-label="Write a caption..."]',
                 'textarea[placeholder="Write a caption..."]',
                 'textarea[aria-label="キャプションを入力..."]',
+                'textarea[aria-label="输入说明文字..."]',
                 'div[role="textbox"]',
             ]
             caption_box = None
@@ -411,6 +446,7 @@ def post_photo(image_path: str, caption: str) -> bool:
                 'div[role="button"]:has-text("Share")',
                 'button:has-text("Share")',
                 'div[role="button"]:has-text("共有")',
+                'div[role="button"]:has-text("分享")',
                 '[aria-label="Share"]',
             ]:
                 try:
