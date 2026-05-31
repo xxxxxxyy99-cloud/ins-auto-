@@ -1,0 +1,36 @@
+# Sensitive — never commit real keys
+.env
+*.env
+!/.env.example
+
+# Database (contains sessions, tokens)
+*.db
+*.db-shm
+*.db-wal
+
+# Session file
+ig_session.json
+
+# Generated images
+generated_images/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Build / IDE
+build/
+dist/
+*.spec
+*.zip
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Streamlit
+.streamlit/
