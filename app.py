@@ -213,10 +213,15 @@ def _start_auto():
     from ins账号自动化.state import StateMachine
     StateMachine().set_running(True)
 
+    # Capture values BEFORE starting thread — st.session_state is NOT
+    # available from background threads in Streamlit.
+    _username = st.session_state.ig_username
+    _sessionid = st.session_state.ig_sessionid
+
     def worker():
         try:
             from ins账号自动化.automation import automation_worker as aw
-            aw(st.session_state.ig_username, st.session_state.ig_sessionid,
+            aw(_username, _sessionid,
                lambda: not get_status().get("running", False))
         except Exception as e:
             log.error("worker_crash", message=str(e))
@@ -946,6 +951,22 @@ def page_settings():
 
     st.divider()
     st.caption(f"当前配置: 文案 {s.get('llm_model')} · 图片 {s.get('image_model')} · SQLite")
+
+
+# ═══════════════════════════════════════════════════════════
+#  AUTO-START: if worker was running before, resume it
+# ═══════════════════════════════════════════════════════════
+
+if "_auto_started" not in st.session_state:
+    st.session_state._auto_started = False
+
+if not st.session_state._auto_started and not st.session_state.get("automation_thread"):
+    status = get_status()
+    if status.get("running"):
+        # State says running but no thread → crash recovery, auto-restart
+        log.info("auto_restart", message="检测到之前运行中，自动恢复")
+        _start_auto()
+    st.session_state._auto_started = True
 
 
 # ═══════════════════════════════════════════════════════════

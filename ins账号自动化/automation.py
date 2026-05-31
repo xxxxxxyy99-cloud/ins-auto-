@@ -64,11 +64,29 @@ def next_post_delay(interval_days: int | None = None) -> float:
     sched = get_scheduled_time()
 
     if sched is None or sched <= datetime.now() or stored_interval != interval:
-        sched = generate_scheduled_time(interval_days)
+        # Schedule is overdue or missing — check if we should post now
+        last_raw = data.get("last_post")
+        in_window = _in_posting_window()
+        if in_window:
+            # We're in the posting window → post now, don't wait
+            log.info("immediate_post", message="发布窗口内且已逾期，立即发布")
+            sched = datetime.now()  # triggers delay=0
+        elif last_raw:
+            # Outside window but have posted before → schedule next window
+            sched = generate_scheduled_time(interval_days)
+        else:
+            # First run, not in window → schedule next window
+            sched = generate_scheduled_time(interval_days)
 
     delta = (sched - datetime.now()).total_seconds()
     log.debug("delay_check", message=f"距下次发布: {delta/3600:.1f}h")
     return max(delta, 0)
+
+
+def _in_posting_window() -> bool:
+    """Check if current hour is within the allowed posting window."""
+    now = datetime.now()
+    return POST_WINDOW_START <= now.hour < POST_WINDOW_END
 
 
 def save_last_post():
@@ -118,15 +136,18 @@ def automation_worker(username: str, sessionid: str = "", stop_check=None):
             # ── Wait for scheduled time ──
             delay = next_post_delay(interval)
             log.info("waiting", message=f"等待 {delay/3600:.1f}h 到下次发布 (第{total_cycles}轮)")
-            waited = 0.0
-            while waited < delay:
+            deadline = datetime.now().timestamp() + delay
+            while True:
                 if stop_check():
                     sm.set_running(False)
                     return
-                # Longer sleep to reduce CPU, but still responsive to stop
-                chunk = min(30, delay - waited)
+                remaining = deadline - datetime.now().timestamp()
+                if remaining <= 0:
+                    break  # time to post!
+                # Sleep in chunks, but re-check real time each iteration
+                # so system sleep/hibernate doesn't make us miss the window
+                chunk = min(60, remaining)
                 time.sleep(chunk)
-                waited += chunk
 
             if stop_check():
                 sm.set_running(False)
