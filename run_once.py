@@ -43,23 +43,28 @@ def _safe_qs(page, sel):
 
 
 def launch_browser(pw, use_session=False):
-    """Launch browser — prefer system Chrome with stored session for fingerprint."""
+    """Launch browser — prefer system Chrome for real fingerprint."""
     ctx_kwargs = dict(viewport={"width": 1280, "height": 900})
     if use_session and SESSION_FILE.exists():
         ctx_kwargs["storage_state"] = str(SESSION_FILE)
-        print("  Loading saved session...")
 
-    # Try system Chrome first (best fingerprint)
-    for attempt in [
+    # Chrome paths to try (in order of preference)
+    chrome_paths = [
         {"channel": "chrome"},
-        {},  # fallback: Chromium
-    ]:
+        {"executable_path": "C:/Program Files/Google/Chrome/Application/chrome.exe"},
+        {"executable_path": "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"},
+        {"executable_path": os.path.expanduser("~/AppData/Local/Google/Chrome/Application/chrome.exe")},
+        {},  # fallback: Playwright Chromium
+    ]
+
+    for opts in chrome_paths:
         try:
-            launch_args = dict(headless=False, args=ARGS, **attempt)
+            launch_args = dict(headless=False, args=ARGS, **opts)
             browser = pw.chromium.launch(**launch_args)
             ctx = browser.new_context(**ctx_kwargs)
             page = ctx.new_page()
-            print(f"  Browser OK (channel={attempt.get('channel', 'chromium')})")
+            label = opts.get("channel") or opts.get("executable_path") or "chromium"
+            print(f"  Browser: {label}")
             return browser, ctx, page
         except Exception:
             continue
