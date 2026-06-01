@@ -42,36 +42,29 @@ def _safe_qs(page, sel):
         return False
 
 
-def launch_browser(pw):
-    """Launch persistent browser — cookies survive across restarts, no login needed after first time."""
-    profile_dir = str(DATA_DIR / "chrome_profile")
-    opts = dict(
-        headless=False,
-        args=ARGS,
-        viewport={"width": 1280, "height": 900},
-    )
-    try:
-        browser = pw.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            channel="chrome",
-            **opts,
-        )
-        print("  Using system Chrome with persistent profile")
-    except Exception:
-        try:
-            browser = pw.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                **opts,
-            )
-            print("  Using Chromium with persistent profile")
-        except Exception as e:
-            print(f"  Launch error: {e}, trying regular...")
-            browser = pw.chromium.launch(**opts)
-            ctx = browser.new_context()
-            return browser, ctx, ctx.new_page()
+def launch_browser(pw, use_session=False):
+    """Launch browser — prefer system Chrome with stored session for fingerprint."""
+    ctx_kwargs = dict(viewport={"width": 1280, "height": 900})
+    if use_session and SESSION_FILE.exists():
+        ctx_kwargs["storage_state"] = str(SESSION_FILE)
+        print("  Loading saved session...")
 
-    page = browser.new_page()
-    return browser, browser, page  # persistent: browser IS context
+    # Try system Chrome first (best fingerprint)
+    for attempt in [
+        {"channel": "chrome"},
+        {},  # fallback: Chromium
+    ]:
+        try:
+            launch_args = dict(headless=False, args=ARGS, **attempt)
+            browser = pw.chromium.launch(**launch_args)
+            ctx = browser.new_context(**ctx_kwargs)
+            page = ctx.new_page()
+            print(f"  Browser OK (channel={attempt.get('channel', 'chromium')})")
+            return browser, ctx, page
+        except Exception:
+            continue
+
+    raise Exception("Cannot launch any browser")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -84,38 +77,46 @@ if __name__ == "__main__":
 
     pw = sync_playwright().start()
 
-    # ─── LOGIN (first time only — persistent profile remembers it) ───
-    browser, ctx, page = launch_browser(pw)
-    page.goto(IG_URL, wait_until="networkidle", timeout=30000)
-    time.sleep(3)
+    # ─── LOGIN ───
+    if SESSION_FILE.exists():
+        browser, ctx, page = launch_browser(pw, use_session=True)
+        page.goto(IG_URL, wait_until="networkidle", timeout=30000)
+        time.sleep(3)
+    else:
+        print("\n>>> First-time login required.")
+        print(">>> System Chrome opens. Log in ONCE.")
+        print(">>> Session saved. Next run auto-login.\n")
+        browser, ctx, page = launch_browser(pw, use_session=False)
 
     if not detect_login(page):
-        print("\n>>> Not logged in. First-time setup required.")
-        print(">>> Browser will open Instagram. Log in ONCE.")
-        print(">>> After login, cookies persist forever in chrome_profile/.\n")
         page.goto(f"{IG_URL}/accounts/login/", wait_until="networkidle", timeout=30000)
         time.sleep(2)
         print(f"  Login page: {page.url}")
+        print("  Log in now. Auto-detection active...")
 
         for i in range(300):
             time.sleep(1)
             try:
                 if detect_login(page):
-                    print(f"\n  Login detected! ({i}s)")
+                    ctx.storage_state(path=str(SESSION_FILE))
+                    print(f"\n  Session saved! ({i}s)")
                     break
             except Exception:
                 pass
             if i % 60 == 0 and i > 0:
                 try:
                     page.goto(IG_URL, wait_until="networkidle", timeout=10000)
-                except Exception:
+                except:
                     pass
                 print(f"  [{i}s] URL={page.url[:80]}")
         else:
             print("\n  Login timed out.")
             browser.close(); pw.stop(); sys.exit(1)
     else:
-        print("  Already logged in — persistent profile works!")
+        # Already logged in from session
+        print("  Auto-login successful!")
+        if not SESSION_FILE.exists():
+            ctx.storage_state(path=str(SESSION_FILE))
 
     # ─── GENERATE ───
     print("\n--- Generating content ---")
@@ -137,15 +138,11 @@ if __name__ == "__main__":
 
     # ─── POST ───
     print("\n--- Posting ---")
-    # Reuse existing browser from login step
     try:
-        # 1. Verify session
+        # 1. Navigate home
         page.goto(IG_URL, wait_until="networkidle", timeout=30000)
-        time.sleep(3)
-        if not detect_login(page):
-            print("Session expired! Delete ig_session.json and re-run.")
-            browser.close(); pw.stop(); sys.exit(1)
-        print("[1] Session OK")
+        time.sleep(2)
+        print("[1] On home page")
 
         # 2. Navigate to create page
         print("[2] Opening create page...")
@@ -257,7 +254,4 @@ if __name__ == "__main__":
         except:
             pass
         pw.stop()
-        # Clean up old session file (no longer used, persistent profile handles everything)
-        if SESSION_FILE.exists():
-            SESSION_FILE.unlink(missing_ok=True)
     print("Done.")
