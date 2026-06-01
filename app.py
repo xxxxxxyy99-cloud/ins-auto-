@@ -222,30 +222,23 @@ if not st.session_state.authenticated:
 # ═══════════════════════════════════════════════════════════
 
 def _start_auto():
-    if st.session_state.automation_thread and st.session_state.automation_thread.is_alive():
+    """Start automation in a separate PROCESS (not thread) to avoid Playwright asyncio conflict."""
+    import subprocess
+
+    # Check if already running
+    if st.session_state.get("_worker_proc") and st.session_state._worker_proc.poll() is None:
         return
+
     set_running(True)
-    from ins账号自动化.state import StateMachine
-    StateMachine().set_running(True)
 
-    # Capture values BEFORE starting thread — st.session_state is NOT
-    # available from background threads in Streamlit.
-    _username = st.session_state.ig_username
-    _sessionid = st.session_state.ig_sessionid
-
-    def worker():
-        try:
-            from ins账号自动化.automation import automation_worker as aw
-            aw(_username, _sessionid,
-               lambda: not get_status().get("running", False))
-        except Exception as e:
-            log.error("worker_crash", message=str(e))
-            set_running(False)
-
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    st.session_state.automation_thread = t
-    log.info("start", message="自动化启动")
+    # Launch worker.py as a separate process
+    proc = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve().parent / "worker.py")],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    st.session_state._worker_proc = proc
+    log.info("start", message=f"自动化已启动 (PID={proc.pid})")
 
 
 def _delay():
@@ -316,7 +309,9 @@ with st.sidebar:
     st.divider()
 
     status = get_status()
-    is_run = status.get("running", False)
+    # Check if worker process is actually alive
+    proc = st.session_state.get("_worker_proc")
+    is_run = proc is not None and proc.poll() is None
     sched = get_schedule()
     next_post = sched.get("next_post", "")
 
@@ -336,6 +331,9 @@ with st.sidebar:
     if is_run:
         if st.button("⏹ 停止", use_container_width=True):
             set_running(False)
+            if proc:
+                proc.terminate()
+                st.session_state._worker_proc = None
             log.info("stop", message="手动停止")
             st.rerun()
     else:
@@ -347,6 +345,10 @@ with st.sidebar:
 
     if st.button("🚪 断开连接", use_container_width=True):
         set_running(False)
+        proc = st.session_state.get("_worker_proc")
+        if proc:
+            proc.terminate()
+            st.session_state._worker_proc = None
         st.session_state.authenticated = False
         st.rerun()
 
@@ -984,12 +986,14 @@ def page_settings():
 if "_auto_started" not in st.session_state:
     st.session_state._auto_started = False
 
-if not st.session_state._auto_started and not st.session_state.get("automation_thread"):
-    status = get_status()
-    if status.get("running"):
-        # State says running but no thread → crash recovery, auto-restart
-        log.info("auto_restart", message="检测到之前运行中，自动恢复")
-        _start_auto()
+if not st.session_state._auto_started:
+    proc = st.session_state.get("_worker_proc")
+    if proc is None or proc.poll() is not None:
+        # Check DB — if state says running, auto-restart after crash
+        status = get_status()
+        if status.get("running"):
+            log.info("auto_restart", message="检测到之前运行中，自动恢复")
+            _start_auto()
     st.session_state._auto_started = True
 
 

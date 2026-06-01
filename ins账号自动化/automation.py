@@ -206,7 +206,7 @@ def automation_worker(username: str, sessionid: str = "", stop_check=None):
                     log.info("cycle_done", message=f"第{total_cycles}轮完成")
                 else:
                     db.queue_mark_pending(post["id"])
-                    raise Exception("发布失败 (instagrapi)")
+                    raise Exception("发布失败 (Playwright)")
             else:
                 log.warn("queue_empty", message="队列为空，跳过发布")
                 consecutive_errors = 0  # empty queue is not an error
