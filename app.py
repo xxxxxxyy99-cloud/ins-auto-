@@ -34,10 +34,6 @@ from ins账号自动化.content import (
 
 log = get_logger("ui")
 
-# Module-level flags for cross-thread login signaling
-_login_done = False
-_login_error_msg: str | None = None
-
 # ── Page config ──────────────────────────────────────────
 
 st.set_page_config(
@@ -176,17 +172,15 @@ if not st.session_state.authenticated:
             demo = st.button("🎮 离线模式", use_container_width=True)
 
         if login_clicked:
-            _login_error_msg = None
-            import atexit
+            st.session_state._login_start_time = time.time()
+            from ins账号自动化.bot import SESSION_FILE as _session_file
+
             def _thread_login():
-                global _login_done, _login_error_msg
                 try:
                     from ins账号自动化.bot import login as pw_login
-                    cl = pw_login(interactive=True)
-                    if cl:
-                        _login_done = True
-                except Exception as e:
-                    _login_error_msg = str(e)[:200]
+                    pw_login(interactive=True)
+                except Exception:
+                    pass
 
             t = threading.Thread(target=_thread_login, daemon=True)
             t.start()
@@ -194,17 +188,21 @@ if not st.session_state.authenticated:
             st.rerun()
 
         if st.session_state.get("_login_started"):
-            if _login_done:
+            from ins账号自动化.bot import SESSION_FILE as _sf
+            start_t = st.session_state._login_start_time
+            # Check if session file was just written (login succeeded)
+            if _sf.exists() and _sf.stat().st_mtime > start_t:
                 st.session_state.ig_username = "instagram_user"
                 st.session_state.authenticated = True
-                _login_done = False
+                st.session_state._login_started = False
                 st.rerun()
-            elif _login_error_msg:
-                st.error(_login_error_msg)
-                _login_error_msg = None
+            # Timeout after 5 minutes
+            elif time.time() - start_t > 300:
+                st.error("登录超时（5分钟），请重试。")
                 st.session_state._login_started = False
             else:
-                with st.spinner("浏览器已打开 → 在浏览器中登录 Instagram → 自动检测..."):
+                elapsed = int(time.time() - start_t)
+                with st.spinner(f"浏览器已打开 → 登录 Instagram → 自动检测（{elapsed}秒 / 5分钟）..."):
                     time.sleep(3)
                     st.rerun()
 
