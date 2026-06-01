@@ -185,31 +185,28 @@ def login(
         "--no-sandbox",
     ]
 
-    # ── Route A: restore saved session ──
+    # ── Route A: restore saved session (silent) ──
     if SESSION_FILE.exists():
         print("Restoring saved session...")
         try:
-            browser = pw.chromium.launch_persistent_context(
-                user_data_dir=str(DATA_DIR / "browser_profile"),
-                headless=False,
-                args=browser_args,
+            browser = pw.chromium.launch(headless=False, args=browser_args)
+            context = browser.new_context(
+                storage_state=str(SESSION_FILE),
                 user_agent=MOBILE_USER_AGENT,
                 viewport={"width": 412, "height": 915},
                 device_scale_factor=2,
-                storage_state=str(SESSION_FILE),
             )
-            page = browser.new_page()
+            page = context.new_page()
             page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=30000)
-            _human_delay("page_load", 2, 4)
+            time.sleep(3)
 
             if _is_logged_in(page):
-                # Persistent context wraps browser + context in one object
-                client = InstaClient(browser, browser, page)
+                client = InstaClient(browser, context, page)
                 _cl = client
                 print(f"Session restored — logged in as @{user}")
                 return client
 
-            print("Saved session expired, logging in fresh...")
+            print("Saved session expired, need manual login.")
             browser.close()
         except Exception as e:
             print(f"Session restore failed: {e}")
@@ -227,20 +224,20 @@ def login(
         )
 
     # ── Manual login: open browser, user logs in themselves ──
-    print("Opening Instagram for manual login...")
-    print("Please log in yourself. The browser will stay open.")
-    print("When you see your Instagram feed, press Enter here to save session.")
+    print()
+    print("=" * 50)
+    print("  Browser will open. Log in manually.")
+    print("  After you see your feed, press Enter here.")
+    print("=" * 50)
     print()
 
-    browser = pw.chromium.launch_persistent_context(
-        user_data_dir=str(DATA_DIR / "browser_profile"),
-        headless=False,
-        args=browser_args,
+    browser = pw.chromium.launch(headless=False, args=browser_args)
+    context = browser.new_context(
         user_agent=MOBILE_USER_AGENT,
         viewport={"width": 412, "height": 915},
         device_scale_factor=2,
     )
-    page = browser.new_page()
+    page = context.new_page()
     page.goto(f"{INSTAGRAM_URL}/accounts/login/", wait_until="domcontentloaded", timeout=30000)
 
     # Wait for user to complete login manually
@@ -273,11 +270,11 @@ def login(
         )
 
     # Save session
-    browser.storage_state(path=str(SESSION_FILE))
+    context.storage_state(path=str(SESSION_FILE))
     print(f"Session saved to {SESSION_FILE.name}")
     _save_sessionid_to_db(sessionid if sessionid else "")
 
-    client = InstaClient(browser, browser, page)
+    client = InstaClient(browser, context, page)
     _cl = client
     print(f"Logged in as @{user}")
     return client
