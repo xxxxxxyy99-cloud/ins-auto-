@@ -35,7 +35,7 @@ def generate_and_queue(count: int = 1):
             caption = generate_caption(product, style=style, niche=audience or niche,
                                        model=llm_model, instructions=caption_instructions)
             if hashtags_raw.strip():
-                caption = build_caption(caption, product, hashtags_raw.split())
+                caption = build_caption(caption, hashtags_raw.split())
             db.queue_push(image_path, caption, product)
             db.analytics_increment("generated")
             print(f"  [{i+1}/{count}] Queued: {product}")
@@ -89,7 +89,7 @@ def generate_and_post(count: int = 1):
             caption = generate_caption(product, style=style, niche=audience or niche,
                                        model=llm_model, instructions=caption_instructions)
             if hashtags_raw.strip():
-                caption = build_caption(caption, product, hashtags_raw.split())
+                caption = build_caption(caption, hashtags_raw.split())
             success = post_photo(image_path, caption)
             if success:
                 db.history_add(image_path, caption, product)
@@ -133,7 +133,7 @@ def run_scheduler():
             caption = generate_caption(product, style=style, niche=audience or niche,
                                        model=llm_model, instructions=caption_instructions)
             if hashtags_raw.strip():
-                caption = build_caption(caption, product, hashtags_raw.split())
+                caption = build_caption(caption, hashtags_raw.split())
             success = post_photo(image_path, caption)
             if success:
                 db.history_add(image_path, caption, product)

@@ -177,7 +177,7 @@ def automation_worker(username: str, sessionid: str = "", stop_check=None):
             caption = generate_caption(product, style=style, niche=audience or niche,
                                        model=llm_model, instructions=caption_instructions)
             if hashtags_raw.strip():
-                caption = build_caption(caption, product, hashtags_raw.split())
+                caption = build_caption(caption, hashtags_raw.split())
             log.info("content_generated", product=product, message="内容生成成功")
 
             # ── Step 2: Queue ──
