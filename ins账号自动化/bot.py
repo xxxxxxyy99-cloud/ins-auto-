@@ -252,23 +252,24 @@ def login(
     page = context.new_page()
     page.goto(f"{INSTAGRAM_URL}/accounts/login/", wait_until="domcontentloaded", timeout=30000)
 
-    # Wait for user to login — poll every 2 seconds, max 5 minutes
-    print("  Waiting for login...", end="", flush=True)
+    # Wait for user to login — poll every 1 second, max 5 minutes
+    print("  Waiting for login...", flush=True)
     logged_in = False
-    for _ in range(150):  # 150 x 2s = 5 min
-        time.sleep(2)
-        print(".", end="", flush=True)
-        # Reload/navigate to main page to check login state
+    for i in range(300):  # 300 x 1s = 5 min
+        time.sleep(1)
         try:
-            if _is_logged_in(page):
-                logged_in = True
-                break
-            # Also try going to home page if user might have logged in
-            if page.url != INSTAGRAM_URL and "login" not in page.url:
-                page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=10000)
+            url = page.url
+            # If URL changed from login page, user probably logged in
+            if "accounts/login" not in url and "challenge" not in url:
+                page.goto(INSTAGRAM_URL, wait_until="networkidle", timeout=8000)
+                time.sleep(1)
                 if _is_logged_in(page):
                     logged_in = True
+                    print(f"  Login detected after {i}s")
                     break
+                else:
+                    # Not yet — go back to wherever we were
+                    print(f"  URL changed but not logged in: {url[:80]}")
         except Exception:
             pass
     print()
