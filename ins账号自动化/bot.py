@@ -207,6 +207,8 @@ def login(
             time.sleep(3)
 
             if _is_logged_in(page):
+                # Re-save session so mtime is fresh (Streamlit login detect needs this)
+                context.storage_state(path=str(SESSION_FILE))
                 client = InstaClient(browser, context, page)
                 _cl = client
                 print(f"Session restored — logged in as @{user}")
