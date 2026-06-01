@@ -191,7 +191,7 @@ if not st.session_state.authenticated:
             from ins账号自动化.bot import SESSION_FILE as _sf
             start_t = st.session_state._login_start_time
             # Check if session file was just written (login succeeded)
-            if _sf.exists() and _sf.stat().st_mtime > start_t:
+            if _sf.exists() and _sf.stat().st_mtime >= start_t:
                 st.session_state.ig_username = "instagram_user"
                 st.session_state.authenticated = True
                 st.session_state._login_started = False
