@@ -157,14 +157,20 @@ def login(
     username: str | None = None,
     password: str | None = None,
     sessionid: str | None = None,
+    interactive: bool = True,
 ) -> InstaClient:
     """
     Login to Instagram via Playwright browser.
 
-    Routes (in priority order):
-      A. Saved Playwright session file  → restore cookies, verify
-      B. Username + password            → fill login form, submit
-      C. No credentials                 → raise error
+    Args:
+        username: Instagram username (defaults to IG_USERNAME from config)
+        password: Instagram password (defaults to IG_PASSWORD from config)
+        sessionid: Not used in Playwright version (kept for backward compat)
+        interactive: If True, opens browser for manual login when session expired.
+                     If False, only tries silent restore (raises on failure).
+
+    Returns:
+        InstaClient wrapping browser + page.
     """
     global _cl
 
@@ -216,18 +222,24 @@ def login(
                 pass
             SESSION_FILE.unlink(missing_ok=True)
 
-    # ── Route B: username + password login ──
+    # ── Route B: interactive session expired or first-time login ──
+    if not interactive:
+        raise Exception(
+            "Session expired and not in interactive mode. "
+            "Please log in manually through the Streamlit dashboard first."
+        )
+
     if not pwd or pwd == "your-instagram-password":
         raise Exception(
             "No saved session and no password configured.\n"
             "请先通过 Streamlit 界面登录一次，或编辑 data/.env 设置 IG_USERNAME 和 IG_PASSWORD"
         )
 
-    # ── Manual login: open browser, user logs in themselves ──
+    # ── Manual login: open browser, auto-detect when user logs in ──
     print()
     print("=" * 50)
-    print("  Browser will open. Log in manually.")
-    print("  After you see your feed, press Enter here.")
+    print("  Browser will open. Log in to Instagram.")
+    print("  Login will be auto-detected — no need to press anything.")
     print("=" * 50)
     print()
 
@@ -240,33 +252,33 @@ def login(
     page = context.new_page()
     page.goto(f"{INSTAGRAM_URL}/accounts/login/", wait_until="domcontentloaded", timeout=30000)
 
-    # Wait for user to complete login manually
-    try:
-        input(">>> Press Enter after you've logged in to Instagram... ")
-    except (EOFError, KeyboardInterrupt):
-        pass
+    # Wait for user to login — poll every 2 seconds, max 5 minutes
+    print("  Waiting for login...", end="", flush=True)
+    logged_in = False
+    for _ in range(150):  # 150 x 2s = 5 min
+        time.sleep(2)
+        print(".", end="", flush=True)
+        # Reload/navigate to main page to check login state
+        try:
+            if _is_logged_in(page):
+                logged_in = True
+                break
+            # Also try going to home page if user might have logged in
+            if page.url != INSTAGRAM_URL and "login" not in page.url:
+                page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=10000)
+                if _is_logged_in(page):
+                    logged_in = True
+                    break
+        except Exception:
+            pass
+    print()
 
-    # Debug: dump page state
-    print(f"  URL: {page.url}")
-    print(f"  Title: {page.title()}")
-    svgs = page.query_selector_all('svg[aria-label]')
-    labels = [s.get_attribute('aria-label') for s in svgs if s.get_attribute('aria-label')]
-    print(f"  SVG aria-labels: {labels}")
-    alt_svgs = page.query_selector_all('svg')
-    print(f"  Total SVGs: {len(alt_svgs)}")
-    # Check for any role="link" or nav items
-    nav_items = page.query_selector_all('nav a, nav span, [role="navigation"] a')
-    print(f"  Nav items: {len(nav_items)}")
-    page.screenshot(path=str(DATA_DIR / "login_debug.png"))
-    print(f"  Debug screenshot saved")
-
-    # Verify login succeeded
-    if not _is_logged_in(page):
+    if not logged_in:
+        page.screenshot(path=str(DATA_DIR / "login_timeout.png"))
         browser.close()
         raise Exception(
-            "Login not detected. The page may not be fully loaded or "
-            "Instagram's UI has changed. Check the screenshot at "
-            f"{DATA_DIR / 'login_debug.png'}"
+            "Login timed out (5 min). Browser closed. "
+            f"Check screenshot: {DATA_DIR / 'login_timeout.png'}"
         )
 
     # Save session
@@ -302,13 +314,13 @@ def _warmup_session():
 
 
 def _reconnect() -> bool:
-    """Try to restore saved session silently. No manual login."""
+    """Try to restore saved session silently. Never opens manual login."""
     global _cl
     if not SESSION_FILE.exists():
         return False
     print("Reconnecting from saved session...")
     try:
-        login()  # Will use Route A (saved session) since SESSION_FILE exists
+        login(interactive=False)
         return _cl is not None and bool(_cl)
     except Exception as e:
         print(f"Silent reconnect failed: {e}")

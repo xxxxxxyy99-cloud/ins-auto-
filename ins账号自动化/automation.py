@@ -115,6 +115,8 @@ def _is_fatal(error_msg: str) -> bool:
 
 
 def automation_worker(username: str, sessionid: str = "", stop_check=None):
+    # Note: sessionid is kept for backward compat but no longer used.
+    # Playwright uses storage_state for session management.
     sm = StateMachine()
     consecutive_errors = 0
     total_cycles = 0
@@ -189,7 +191,7 @@ def automation_worker(username: str, sessionid: str = "", stop_check=None):
             sm.transition(State.POSTING)
             log.info("posting", product=product, message="正在发布到 Instagram...")
 
-            cl = login(username, sessionid=sessionid)
+            cl = login(username, interactive=False)
             post = db.queue_pop()
             if post:
                 success = post_photo(post["image_path"], post["caption"])

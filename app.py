@@ -34,6 +34,10 @@ from ins账号自动化.content import (
 
 log = get_logger("ui")
 
+# Module-level flags for cross-thread login signaling
+_login_done = False
+_login_error_msg: str | None = None
+
 # ── Page config ──────────────────────────────────────────
 
 st.set_page_config(
@@ -162,36 +166,47 @@ if not st.session_state.authenticated:
 
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        with st.form("login_form"):
-            st.markdown("### 🔐 连接 Instagram")
-            u = st.text_input("用户名", placeholder="your_username")
-            s = st.text_input(
-                "Session ID",
-                placeholder="F12 → Application → Cookies → sessionid",
-                help="在 Chrome/Edge 打开 Instagram → F12 → Application → Cookies → instagram.com → 复制 sessionid 的值"
-            )
-            col_a, col_b = st.columns(2)
-            with col_a:
-                submitted = st.form_submit_button("🔗 连接", use_container_width=True, type="primary")
-            with col_b:
-                demo = st.form_submit_button("🎮 离线模式", use_container_width=True)
+        st.markdown("### 🔐 连接 Instagram")
+        st.caption("点击下方按钮，浏览器会自动打开 Instagram 登录页。登录成功后自动检测并返回。")
 
-        if submitted:
-            if u and s:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            login_clicked = st.button("🔗 浏览器登录", use_container_width=True, type="primary")
+        with col_b:
+            demo = st.button("🎮 离线模式", use_container_width=True)
+
+        if login_clicked:
+            _login_error_msg = None
+            import atexit
+            def _thread_login():
+                global _login_done, _login_error_msg
                 try:
-                    from ins账号自动化.bot import login
-                    cl = login(username=u, sessionid=s.strip())
+                    from ins账号自动化.bot import login as pw_login
+                    cl = pw_login(interactive=True)
                     if cl:
-                        st.session_state.ig_username = u
-                        st.session_state.ig_sessionid = s.strip()
-                        st.session_state.authenticated = True
-                        # Persist to DB so scheduler can use it
-                        save_settings(ig_sessionid=s.strip())
-                        st.rerun()
+                        _login_done = True
                 except Exception as e:
-                    st.error(f"登录失败: {e}")
+                    _login_error_msg = str(e)[:200]
+
+            t = threading.Thread(target=_thread_login, daemon=True)
+            t.start()
+            st.session_state._login_started = True
+            st.rerun()
+
+        if st.session_state.get("_login_started"):
+            if _login_done:
+                st.session_state.ig_username = "instagram_user"
+                st.session_state.authenticated = True
+                _login_done = False
+                st.rerun()
+            elif _login_error_msg:
+                st.error(_login_error_msg)
+                _login_error_msg = None
+                st.session_state._login_started = False
             else:
-                st.error("请填写用户名和 Session ID")
+                with st.spinner("浏览器已打开 → 在浏览器中登录 Instagram → 自动检测..."):
+                    time.sleep(3)
+                    st.rerun()
 
         if demo:
             st.session_state.ig_username = "demo_user"
