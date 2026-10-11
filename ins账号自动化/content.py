@@ -185,13 +185,32 @@ def generate_prompt(
     return prompt, product
 
 
-def build_caption(text: str, hashtags: Optional[list[str]] = None) -> str:
-    """Append hashtags to caption."""
-    if hashtags:
-        picked = random.sample(hashtags, min(8, len(hashtags)))
-        tags = " ".join(picked)
-        return f"{text}\n.\n.\n{tags}"
-    return text
+def build_caption(text: str, hashtags: Optional[list[str]] = None,
+                  limit: Optional[int] = None) -> str:
+    """Append a cleaned, deduplicated hashtag block to a caption.
+
+    limit: max number of tags to append. None keeps every tag (hard-capped
+    at Instagram's 30). Tags are normalized to start with '#'.
+    """
+    if not hashtags:
+        return text
+    seen = set()
+    picked = []
+    for raw in hashtags:
+        t = str(raw).strip().strip(",").strip(".")
+        if not t:
+            continue
+        if not t.startswith("#"):
+            t = "#" + t
+        if len(t) < 2 or t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        picked.append(t)
+    cap = 30 if limit is None else max(1, min(int(limit), 30))
+    picked = picked[:cap]
+    if not picked:
+        return text
+    return f"{text}\n.\n.\n{' '.join(picked)}"
 
 
 # ═══════════════════════════════════════════════════════════

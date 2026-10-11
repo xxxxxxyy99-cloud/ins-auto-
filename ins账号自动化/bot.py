@@ -251,10 +251,10 @@ BROWSER_ARGS = [
 ]
 
 
-def _new_browser():
+def _new_browser(headless: bool = False):
     """Create a fresh browser + context with saved session. Caller must close."""
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=False, args=BROWSER_ARGS)
+    browser = pw.chromium.launch(headless=headless, args=BROWSER_ARGS)
     ctx_kwargs = dict(
         user_agent=MOBILE_USER_AGENT,
         viewport={"width": 412, "height": 915},
@@ -269,7 +269,88 @@ def _new_browser():
     return pw, browser, context, page
 
 
-def post_photo(image_path: str, caption: str) -> bool:
+NEXT_BUTTON_SELECTORS = [
+    'div[role="button"]:has-text("Next")',
+    'button:has-text("Next")',
+    'div[role="button"]:has-text("下一步")',
+    'div[role="button"]:has-text("次へ")',
+    '[aria-label="Next"]',
+]
+
+SHARE_BUTTON_SELECTORS = [
+    'div[role="button"]:has-text("Share")',
+    'button:has-text("Share")',
+    'div[role="button"]:has-text("共有")',
+    'div[role="button"]:has-text("分享")',
+    '[aria-label="Share"]',
+]
+
+POST_SUCCESS_MARKERS = [
+    "Your post has been shared", "Post shared", "已分享", "帖子已分享",
+    "你的帖子已分享", "投稿をシェアしました",
+]
+
+POST_ERROR_MARKERS = [
+    "Something went wrong", "something went wrong", "couldn't share",
+    "Couldn't share", "Try Again", "Try again", "无法分享", "再试一次",
+]
+
+
+def _type_caption(page: Page, caption_box, caption: str):
+    """Enter the caption quickly: fill() for textareas, insert_text for
+    contenteditable boxes. Emoji and newlines work without slow per-char typing."""
+    caption_box.click()
+    _human_delay("focus_caption", 0.4, 1.2)
+    try:
+        tag = (caption_box.evaluate("el => el.tagName") or "").upper()
+        if tag == "TEXTAREA":
+            caption_box.fill(caption)
+        else:
+            page.keyboard.insert_text(caption)
+        print(f"  Caption filled ({len(caption)} chars)")
+    except Exception:
+        print("  Fast caption entry failed, falling back to typing...")
+        for ch in caption:
+            caption_box.type(ch, delay=random.randint(40, 120))
+        print(f"  Caption typed ({len(caption)} chars)")
+
+
+def _wait_for_post_result(page: Page, timeout_s: int = 60) -> bool:
+    """Wait until Instagram confirms the post or shows an error dialog.
+
+    Returns True when a success marker appears or the share dialog closes
+    cleanly; False on a detected error or when nothing can be confirmed.
+    """
+    deadline = time.time() + timeout_s
+    gone_checks = 0
+    while time.time() < deadline:
+        time.sleep(1.5)
+        try:
+            for marker in POST_SUCCESS_MARKERS:
+                if page.query_selector(f'text={marker}'):
+                    try:
+                        ok = page.query_selector(
+                            'div[role="button"]:has-text("OK"), button:has-text("OK")')
+                        if ok and ok.is_visible():
+                            ok.click()
+                    except Exception:
+                        pass
+                    return True
+            for marker in POST_ERROR_MARKERS:
+                if page.query_selector(f'text={marker}'):
+                    return False
+            if page.query_selector('div[role="dialog"]') is None:
+                gone_checks += 1
+                if gone_checks >= 2:
+                    return True
+            else:
+                gone_checks = 0
+        except Exception:
+            continue
+    return False
+
+
+def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
     """Upload a photo to Instagram and publish it via Playwright browser.
 
     Creates a fresh browser each call — no shared state across threads.
@@ -281,7 +362,7 @@ def post_photo(image_path: str, caption: str) -> bool:
     pw = None
     browser = None
     try:
-        pw, browser, context, page = _new_browser()
+        pw, browser, context, page = _new_browser(headless=headless)
 
         if not _is_logged_in(page):
             print("Session expired. Please re-login via the dashboard.")
@@ -340,13 +421,7 @@ def post_photo(image_path: str, caption: str) -> bool:
         for step_label in ["crop", "filter"]:
             _human_delay(f"{step_label}_screen", 1, 2)
             next_clicked = False
-            for sel in [
-                'div[role="button"]:has-text("Next")',
-                'button:has-text("Next")',
-                'div[role="button"]:has-text("下一步")',
-                'div[role="button"]:has-text("次へ")',
-                '[aria-label="Next"]',
-            ]:
+            for sel in NEXT_BUTTON_SELECTORS:
                 try:
                     btn = page.wait_for_selector(sel, timeout=8000)
                     if btn and btn.is_visible():
@@ -379,11 +454,7 @@ def post_photo(image_path: str, caption: str) -> bool:
                 continue
 
         if caption_box:
-            caption_box.click()
-            _human_delay("focus_caption", 0.5, 1.5)
-            for ch in caption:
-                caption_box.type(ch, delay=random.randint(60, 180))
-            print(f"  Caption typed ({len(caption)} chars)")
+            _type_caption(page, caption_box, caption)
         else:
             print("  WARNING: Caption box not found, posting without caption")
 
@@ -391,13 +462,7 @@ def post_photo(image_path: str, caption: str) -> bool:
 
         # ── Step 4: Click Share ──
         share_clicked = False
-        for sel in [
-            'div[role="button"]:has-text("Share")',
-            'button:has-text("Share")',
-            'div[role="button"]:has-text("共有")',
-            'div[role="button"]:has-text("分享")',
-            '[aria-label="Share"]',
-        ]:
+        for sel in SHARE_BUTTON_SELECTORS:
             try:
                 btn = page.wait_for_selector(sel, timeout=5000)
                 if btn and btn.is_visible() and btn.is_enabled():
@@ -411,12 +476,17 @@ def post_photo(image_path: str, caption: str) -> bool:
         if not share_clicked:
             raise Exception("Share button not found or not clickable")
 
-        # ── Step 5: Wait for post to complete ──
-        print("  Waiting for post to complete...")
-        _human_delay("posting", 5, 10)
-
-        print(f"  Posted: {Path(image_path).name}")
-        return True
+        # ── Step 5: Wait for Instagram to confirm the post ──
+        print("  Waiting for Instagram to confirm the post...")
+        if _wait_for_post_result(page):
+            print(f"  Posted: {Path(image_path).name}")
+            return True
+        print("  Could not confirm the post was shared — check Instagram manually.")
+        try:
+            page.screenshot(path=str(DATA_DIR / "post_unconfirmed.png"))
+        except Exception:
+            pass
+        return False
 
     except Exception as e:
         err = str(e)
@@ -445,7 +515,7 @@ def post_photo(image_path: str, caption: str) -> bool:
             pass
 
 
-def post_carousel(image_paths: list[str], caption: str) -> bool:
+def post_carousel(image_paths: list[str], caption: str, headless: bool = False) -> bool:
     """Upload multiple images as a carousel post. Fresh browser each call."""
     if not SESSION_FILE.exists():
         print("Not logged in. Please log in first via the dashboard.")
@@ -454,15 +524,26 @@ def post_carousel(image_paths: list[str], caption: str) -> bool:
     pw = None
     browser = None
     try:
-        pw, browser, context, page = _new_browser()
+        pw, browser, context, page = _new_browser(headless=headless)
         if not _is_logged_in(page):
             print("Session expired. Please re-login via the dashboard.")
             return False
 
         _human_delay("pre_carousel", random.uniform(5, 10))
 
-        new_btn = page.wait_for_selector('svg[aria-label="New post"]', timeout=10000)
-        new_btn.click()
+        new_post_sel = None
+        for sel in ['svg[aria-label="New post"]', 'svg[aria-label="New Post"]',
+                    'svg[aria-label="加号图标"]', 'svg[aria-label="新規投稿"]']:
+            try:
+                el = page.wait_for_selector(sel, timeout=8000)
+                if el:
+                    new_post_sel = sel
+                    break
+            except Exception:
+                continue
+        if not new_post_sel:
+            raise Exception("New post button not found — are you logged in?")
+        page.click(new_post_sel)
         _human_delay("after_new_post", 2, 4)
 
         file_input = page.wait_for_selector('input[type="file"]', timeout=15000)
@@ -472,7 +553,7 @@ def post_carousel(image_paths: list[str], caption: str) -> bool:
 
         for step_label in ["crop", "filter", "arrange"]:
             _human_delay(f"{step_label}_screen", 1, 2)
-            for sel in ['div[role="button"]:has-text("Next")', 'button:has-text("Next")']:
+            for sel in NEXT_BUTTON_SELECTORS:
                 try:
                     btn = page.wait_for_selector(sel, timeout=8000)
                     if btn and btn.is_visible():
@@ -483,28 +564,45 @@ def post_carousel(image_paths: list[str], caption: str) -> bool:
                     continue
 
         _human_delay("caption_screen", 2, 4)
-        caption_box = page.wait_for_selector('textarea[aria-label="Write a caption..."]', timeout=10000)
+        caption_box = None
+        for sel in ['textarea[aria-label="Write a caption..."]',
+                    'textarea[placeholder="Write a caption..."]',
+                    'textarea[aria-label="输入说明文字..."]',
+                    'div[role="textbox"]']:
+            try:
+                caption_box = page.wait_for_selector(sel, timeout=8000)
+                if caption_box:
+                    break
+            except Exception:
+                continue
         if caption_box:
-            caption_box.click()
-            for ch in caption:
-                caption_box.type(ch, delay=random.randint(60, 180))
-            print(f"  Caption typed ({len(caption)} chars)")
+            _type_caption(page, caption_box, caption)
+        else:
+            print("  WARNING: Caption box not found, posting without caption")
 
         _human_delay("before_share", 2, 4)
 
-        for sel in ['div[role="button"]:has-text("Share")', 'button:has-text("Share")']:
+        share_clicked = False
+        for sel in SHARE_BUTTON_SELECTORS:
             try:
                 btn = page.wait_for_selector(sel, timeout=5000)
                 if btn and btn.is_visible():
                     btn.click()
-                    print(f"  Clicked Share")
+                    share_clicked = True
+                    print(f"  Clicked Share: {sel}")
                     break
             except Exception:
                 continue
 
-        _human_delay("posting", 5, 10)
-        print(f"  Carousel posted: {len(image_paths)} images")
-        return True
+        if not share_clicked:
+            raise Exception("Share button not found or not clickable")
+
+        print("  Waiting for Instagram to confirm the carousel post...")
+        if _wait_for_post_result(page):
+            print(f"  Carousel posted: {len(image_paths)} images")
+            return True
+        print("  Could not confirm the carousel was shared — check Instagram manually.")
+        return False
 
     except Exception as e:
         print(f"  Carousel failed: {e}")

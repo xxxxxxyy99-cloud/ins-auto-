@@ -3,9 +3,7 @@
 import streamlit as st
 import time
 import sys
-import os
 import random
-import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +31,8 @@ from ins账号自动化 import (
     login as bot_login, post_photo, SESSION_FILE,
     get_logger,
 )
+
+from ins账号自动化.config import GEMINI_API_KEY, OPENROUTER_API_KEY
 
 log = get_logger("ui")
 
@@ -103,7 +103,6 @@ DEFAULTS = {
     "_studio_image": "",
     "_studio_caption": "",
     "_studio_hashtags": "",
-    "_studio_category": "厨房",
     "_gen_history": [],
     "_login_start_time": 0.0,
     "_login_pending": False,
@@ -151,6 +150,25 @@ def _clear_studio():
     for k in ("_studio_prompt", "_studio_product", "_studio_image",
               "_studio_caption", "_studio_hashtags"):
         st.session_state[k] = ""
+    for k in ("edit_caption", "edit_hashtags",
+              "edit_upload_caption", "edit_upload_hashtags", "tag_output"):
+        st.session_state.pop(k, None)
+
+
+def _publish_caption(cap: str, tags: str) -> str:
+    """Final caption text: deduped, limited hashtag block appended."""
+    try:
+        limit = int(get_settings().get("publish_hashtag_limit", "15") or 15)
+    except (TypeError, ValueError):
+        limit = 15
+    return build_caption(cap, tags.split() if tags else None, limit=limit)
+
+
+def _post_failed(product: str, why: str = "Instagram 页面未完成发布"):
+    """Uniform failure bookkeeping: activity log + error counter + notice."""
+    log_event("post_failed", product=product, message=why, severity="error")
+    analytics_increment("errors")
+    st.error(f"❌ 发布失败：{why}。若为登录过期，请点侧边栏「🔌」断开后重新登录，再试一次。")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -405,10 +423,16 @@ elif st.session_state._page == "studio":
 
             st.markdown("#### 🖼️ 图片设置")
             ar = st.selectbox("比例", list(ASPECT_RATIOS.keys()), index=0, key="studio_ar")
-            img_model = st.selectbox("图片模型", ["gemini", "pollinations", "openrouter"],
+            _img_opts = ["gemini", "pollinations", "openrouter"]
+            _saved_img = get_settings().get("image_model", "gemini")
+            img_model = st.selectbox("图片模型", _img_opts,
+                                     index=_img_opts.index(_saved_img) if _saved_img in _img_opts else 0,
                                      key="studio_img_model")
 
             gen_btn = st.button("🎲 生成内容", use_container_width=True, type="primary")
+            if st.button("🧹 清空预览", use_container_width=True):
+                _clear_studio()
+                st.rerun()
 
             if gen_btn:
                 with st.spinner("生成中..."):
@@ -424,24 +448,26 @@ elif st.session_state._page == "studio":
                     caption = generate_caption(product_name, style=style, niche=nic,
                                                model=get_settings().get("llm_model", "qwen/qwen-2.5-7b-instruct"),
                                                instructions=get_settings().get("caption_instructions", ""))
-                    hashtags = get_settings().get("hashtags", "")
-                    if hashtags.strip():
-                        caption = build_caption(caption, hashtags.split())
                     st.session_state._studio_caption = caption
 
                     # Auto-generate hashtags
                     try:
                         tags = generate_hashtags(product_name, niche=nic)
-                        st.session_state._studio_hashtags = tags
                     except Exception:
-                        st.session_state._studio_hashtags = hashtags
+                        tags = get_settings().get("hashtags", "")
+                    st.session_state._studio_hashtags = tags
+
+                    # Keep the editable preview widgets in sync with the new content
+                    st.session_state["edit_caption"] = caption
+                    st.session_state["edit_hashtags"] = tags
 
                     # Save to assets
                     if img_path:
                         asset_add(img_path, product=product_name, category=category,
-                                  prompt=prompt, model=img_model,
-                                  tags=st.session_state._studio_hashtags)
+                                  prompt=prompt, model=img_model, tags=tags)
                         analytics_increment("generated")
+                    else:
+                        st.error("❌ 图片生成失败：所有引擎都不可用。请检查网络，或配置 GEMINI_API_KEY / OpenRouter 余额。")
 
                     st.session_state._gen_history.append((img_path, product_name, prompt))
 
@@ -499,24 +525,22 @@ elif st.session_state._page == "studio":
                         if _ensure_login():
                             final_cap = st.session_state.get("edit_caption", st.session_state._studio_caption)
                             final_tags = st.session_state.get("edit_hashtags", st.session_state._studio_hashtags)
-                            full_caption = build_caption(final_cap, final_tags.split()) if final_tags else final_cap
+                            full_caption = _publish_caption(final_cap, final_tags)
                             with st.spinner("发布中..."):
                                 ok = post_photo(st.session_state._studio_image, full_caption)
                             if ok:
                                 add_to_history(st.session_state._studio_image, full_caption,
                                                st.session_state._studio_product)
                                 analytics_increment("posts")
-                                draft_save(st.session_state._studio_image, full_caption, final_tags,
-                                           st.session_state._studio_product, category,
-                                           topic_sel if topic_sel != "无" else "")
-                                draft_mark_posted(
-                                    draft_get_all("draft")[0]["id"] if draft_get_all("draft") else 0
-                                )
+                                did = draft_save(st.session_state._studio_image, final_cap, final_tags,
+                                                 st.session_state._studio_product, category,
+                                                 topic_sel if topic_sel != "无" else "")
+                                draft_mark_posted(did)
                                 log_event("post_success", product=st.session_state._studio_product,
                                           message="手动发布成功")
                                 st.success("✅ 发布成功！")
                             else:
-                                st.error("发布失败，请检查 Instagram 页面。")
+                                _post_failed(st.session_state._studio_product)
                         else:
                             st.warning("⚠️ 请先在侧边栏登录 Instagram。")
             else:
@@ -540,8 +564,9 @@ elif st.session_state._page == "studio":
                 upload_bytes = uploaded_file.read()
                 fhash = _hl.md5(upload_bytes).hexdigest()[:12]
                 ext = Path(uploaded_file.name).suffix or ".jpg"
-                upload_path = IMAGE_DIR / f"{fhash}_{int(time.time())}{ext}"
-                upload_path.write_bytes(upload_bytes)
+                upload_path = IMAGE_DIR / f"upload_{fhash}{ext}"
+                if not upload_path.exists():
+                    upload_path.write_bytes(upload_bytes)
                 st.session_state._studio_image = str(upload_path)
                 st.success(f"✅ 已上传: {uploaded_file.name}")
 
@@ -584,6 +609,8 @@ elif st.session_state._page == "studio":
                     tags = generate_hashtags(prod, niche=get_settings().get("audience", ""))
                     st.session_state._studio_hashtags = tags
                     st.session_state._studio_product = prod
+                    st.session_state["edit_upload_caption"] = cap
+                    st.session_state["edit_upload_hashtags"] = tags
 
                     # Save to assets
                     asset_add(
@@ -653,18 +680,22 @@ elif st.session_state._page == "studio":
                             if _ensure_login():
                                 final_cap = st.session_state.get("edit_upload_caption", st.session_state._studio_caption)
                                 final_tags = st.session_state.get("edit_upload_hashtags", st.session_state._studio_hashtags)
-                                full_cap = build_caption(final_cap, final_tags.split()) if final_tags else final_cap
+                                full_cap = _publish_caption(final_cap, final_tags)
                                 with st.spinner("发布中..."):
                                     ok = post_photo(st.session_state._studio_image, full_cap)
                                 if ok:
                                     add_to_history(st.session_state._studio_image, full_cap,
                                                    st.session_state._studio_product)
                                     analytics_increment("posts")
+                                    did = draft_save(st.session_state._studio_image, final_cap, final_tags,
+                                                     st.session_state._studio_product, category="upload",
+                                                     topic=upload_topic if upload_topic != "无" else "")
+                                    draft_mark_posted(did)
                                     log_event("post_success", product=st.session_state._studio_product,
                                               message="从图片上传发布")
                                     st.success("✅ 发布成功！")
                                 else:
-                                    st.error("发布失败，检查 Instagram 浏览器页面。")
+                                    _post_failed(st.session_state._studio_product)
                             else:
                                 st.warning("⚠️ 请先在侧边栏登录 Instagram。")
             else:
@@ -681,6 +712,7 @@ elif st.session_state._page == "studio":
             with st.spinner("生成中..."):
                 tags = generate_hashtags(tag_product, niche=tag_niche, category=tag_strategy)
                 st.session_state._studio_hashtags = tags
+                st.session_state["tag_output"] = tags
             st.success("标签已生成")
 
         st.text_area("生成的标签", st.session_state.get("_studio_hashtags", ""), height=100, key="tag_output")
@@ -699,18 +731,17 @@ elif st.session_state._page == "studio":
             for i in range(batch_count):
                 product = random.choice(DEFAULT_CATEGORIES[batch_cat])
                 prompt, prod = generate_prompt(product=product, niche=s.get("audience", ""))
-                img = generate_image(prompt, model=s.get("image_model") or None)
+                img = generate_image(prompt, provider=s.get("image_model") or "pollinations")
                 cap = generate_caption(prod, style=s.get("style", "casual"),
                                        niche=s.get("audience", ""),
                                        model=s.get("llm_model", "qwen/qwen-2.5-7b-instruct"))
                 tags = generate_hashtags(prod, niche=s.get("audience", ""))
-                full_cap = build_caption(cap, tags.split())
 
                 if img:
                     asset_add(img, product=prod, category=batch_cat, prompt=prompt)
-                    draft_save(img, full_cap, tags, prod, batch_cat)
+                    draft_save(img, cap, tags, prod, batch_cat)
                     analytics_increment("generated")
-                    results.append((img, prod, full_cap, tags))
+                    results.append((img, prod, cap, tags))
                     log_event("batch_generated", product=prod)
                 progress.progress((i + 1) / batch_count)
 
@@ -778,10 +809,11 @@ elif st.session_state._page == "drafts":
                         if d["status"] != "posted":
                             if st.button("🚀 发布", key=f"post_{d['id']}", type="primary"):
                                 if _ensure_login():
-                                    full_cap = build_caption(edit_cap, edit_tags.split()) if edit_tags else edit_cap
+                                    full_cap = _publish_caption(edit_cap, edit_tags)
                                     with st.spinner("发布中..."):
                                         ok = post_photo(d["image_path"], full_cap)
                                     if ok:
+                                        draft_update(d["id"], caption=edit_cap, hashtags=edit_tags)
                                         draft_mark_posted(d["id"])
                                         add_to_history(d["image_path"], full_cap, d["product"])
                                         analytics_increment("posts")
@@ -789,7 +821,7 @@ elif st.session_state._page == "drafts":
                                         st.success("✅ 发布成功！")
                                         st.rerun()
                                     else:
-                                        st.error("发布失败，检查 Instagram 浏览器页面。")
+                                        _post_failed(d["product"])
                                 else:
                                     st.warning("⚠️ 请先在侧边栏登录 Instagram。")
 
@@ -902,19 +934,22 @@ elif st.session_state._page == "assets":
                             if st.button("🚀 立即发布", key=f"qp_go_{a['id']}",
                                         use_container_width=True, type="primary"):
                                 if _ensure_login():
-                                    full_cap = build_caption(qp_cap, qp_tags.split()) if qp_tags else qp_cap
+                                    full_cap = _publish_caption(qp_cap, qp_tags)
                                     with st.spinner("发布中..."):
                                         ok = post_photo(a["image_path"], full_cap)
                                     if ok:
                                         add_to_history(a["image_path"], full_cap, a.get("product", ""))
                                         analytics_increment("posts")
+                                        did = draft_save(a["image_path"], qp_cap, qp_tags,
+                                                         a.get("product", ""), topic="")
+                                        draft_mark_posted(did)
                                         log_event("post_success", product=a.get("product", ""),
                                                   message="从素材库直接发布")
                                         st.session_state[pub_key] = False
                                         st.success("✅ 发布成功！")
                                         st.rerun()
                                     else:
-                                        st.error("发布失败，检查 Instagram 浏览器页面。")
+                                        _post_failed(a.get("product", ""))
                                 else:
                                     st.warning("⚠️ 请先在侧边栏登录 Instagram。")
 
@@ -999,17 +1034,19 @@ elif st.session_state._page == "content":
                             if r["status"] != "posted":
                                 if st.button("🚀", key=f"cm_post_{r['id']}", help="发布到 Instagram"):
                                     if _ensure_login():
-                                        cap = build_caption(r["caption"], r.get("hashtags", "").split()) if r.get("hashtags") else r["caption"]
+                                        cap = _publish_caption(r["caption"], r.get("hashtags", ""))
                                         with st.spinner("发布中..."):
                                             ok = post_photo(r["image_path"], cap)
                                         if ok:
                                             draft_mark_posted(r["id"])
                                             add_to_history(r["image_path"], cap, r.get("product", ""))
                                             analytics_increment("posts")
+                                            log_event("post_success", product=r.get("product", ""),
+                                                      message="从内容库发布")
                                             st.success("✅ 已发布")
                                             st.rerun()
                                         else:
-                                            st.error("发布失败")
+                                            _post_failed(r.get("product", ""))
                                     else:
                                         st.warning("⚠️ 请先登录 Instagram")
                         with col_a3:
@@ -1143,6 +1180,11 @@ elif st.session_state._page == "review":
             st.markdown("---")
             if st.button("✅ 全部批准", use_container_width=True, type="primary"):
                 for it in review_items:
+                    draft_update(
+                        it["id"],
+                        caption=st.session_state.get(f"rv_cap_{it['id']}", it["caption"]),
+                        hashtags=st.session_state.get(f"rv_tag_{it['id']}", it.get("hashtags", "")),
+                    )
                     draft_approve(it["id"])
                 log_event("review_bulk_approved", message=f"批量批准 {len(review_items)} 条")
                 st.success(f"已批准 {len(review_items)} 条，全部移至草稿箱。")
@@ -1241,6 +1283,14 @@ elif st.session_state._page == "settings":
 
     s = get_settings()
 
+    _or_ok = bool(OPENROUTER_API_KEY) and not OPENROUTER_API_KEY.startswith("your-")
+    _gm_ok = bool(GEMINI_API_KEY)
+    st.caption(
+        ("✅ OpenRouter Key 已配置" if _or_ok else "❌ OpenRouter Key 未配置") + "  ·  " +
+        ("✅ Gemini Key 已配置" if _gm_ok else
+         "⚠️ Gemini Key 未配置（图片质量更好，免费 500 张/天，去 aistudio.google.com 申请后填入 ins账号自动化/data/.env）")
+    )
+
     tab_s1, tab_s2, tab_s3 = st.tabs(["🎯 品牌 & 内容", "🤖 AI 模型", "🏷️ 默认标签"])
 
     with tab_s1:
@@ -1266,9 +1316,11 @@ elif st.session_state._page == "settings":
         st.markdown("#### 🤖 AI 模型配置")
         new_llm = st.text_input("文案模型", s.get("llm_model", "qwen/qwen-2.5-7b-instruct"),
                                  help="OpenRouter 模型 ID")
-        new_img = st.selectbox("图片模型", ["gemini", "pollinations", "openrouter"],
-                                index=0 if s.get("image_model", "pollinations") == "pollinations" else 1,
-                                help="Pollinations 免费但质量一般，OpenRouter 需要 API key")
+        _img_opts = ["gemini", "pollinations", "openrouter"]
+        _saved_img = s.get("image_model", "gemini")
+        new_img = st.selectbox("图片模型", _img_opts,
+                                index=_img_opts.index(_saved_img) if _saved_img in _img_opts else 0,
+                                help="gemini 需要 GEMINI_API_KEY（免费 500 张/天）；openrouter 需要余额；pollinations 免费但质量一般")
 
         if st.button("💾 保存模型配置", key="save_models"):
             save_settings(llm_model=new_llm, image_model=new_img)

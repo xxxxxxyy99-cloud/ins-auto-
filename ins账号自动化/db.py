@@ -19,6 +19,7 @@ def _get_conn() -> sqlite3.Connection:
         _local.conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")
+        _local.conn.execute("PRAGMA busy_timeout=5000")
         _local.conn.execute("PRAGMA foreign_keys=ON")
     return _local.conn
 
@@ -147,6 +148,7 @@ def log_get_recent(limit: int = 20) -> list[dict]:
 
 DEFAULT_SETTINGS = {
     "interval_days": "2",
+    "publish_hashtag_limit": "15",
     "niche": "kitchen gadgets & home bar",
     "style": "casual",
     "audience": "home cooks, juice lovers & cocktail enthusiasts",
@@ -402,48 +404,6 @@ def draft_count(status: str = "") -> int:
         if status:
             return conn.execute("SELECT COUNT(*) FROM drafts WHERE status=?", (status,)).fetchone()[0]
         return conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
-
-
-# ─── Migration from JSON ────────────────────────────────────
-
-def migrate_from_json():
-    """One-time migration: copy existing JSON data into SQLite."""
-    import json as j
-    JSON_DIR = DATA_DIR  # same directory
-
-    def _read(fname):
-        p = JSON_DIR / fname
-        if p.exists():
-            with open(p, encoding="utf-8") as f:
-                return j.load(f)
-        return None
-
-    queue_data = _read("post_queue.json")
-    if queue_data and isinstance(queue_data, list):
-        for item in queue_data:
-            try:
-                queue_push(item["image_path"], item["caption"], item["product"])
-            except:
-                pass
-
-    hist_data = _read("posted_history.json")
-    if hist_data and isinstance(hist_data, list):
-        now = datetime.now().isoformat()
-        for item in hist_data:
-            try:
-                history_add(item["image_path"], item["caption"], item["product"])
-            except:
-                pass
-
-    sched_data = _read("next_post.json")
-    if sched_data and isinstance(sched_data, dict):
-        schedule_save(sched_data)
-
-    sett_data = _read("automation_settings.json")
-    if sett_data and isinstance(sett_data, dict):
-        settings_set(**sett_data)
-
-    log_event("system", message="数据已从 JSON 迁移到 SQLite")
 
 
 # ─── Public aliases ──────────────────────────────────────────
