@@ -40,7 +40,6 @@ class ActivityLogger:
         self._log("debug", event, product, message, metadata)
 
 
-_LOG = ActivityLogger("system")
 
 
 def get_logger(source: str = "automation") -> ActivityLogger:

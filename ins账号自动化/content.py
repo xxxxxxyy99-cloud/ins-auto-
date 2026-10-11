@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import quote
 from typing import Optional
 
-from .config import OPENROUTER_API_KEY, BASE_DIR
+from .config import OPENROUTER_API_KEY, GEMINI_API_KEY, BASE_DIR
 
 IMAGE_DIR = BASE_DIR / "generated_images"
 IMAGE_DIR.mkdir(exist_ok=True)
@@ -17,12 +17,34 @@ IMAGE_DIR.mkdir(exist_ok=True)
 # ── API endpoints ──────────────────────────────────────────
 
 CAPTION_URL = "https://openrouter.ai/api/v1/chat/completions"
-OR_IMAGE_URL = "https://openrouter.ai/api/v1/images/generations"
+OR_IMAGE_URL = "https://openrouter.ai/api/v1/chat/completions"
+# Default image model for OpenRouter (Gemini Flash Image — cheap, good quality)
+DEFAULT_IMAGE_MODEL = "google/gemini-2.5-flash-image"
 
 CAPTION_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "Content-Type": "application/json",
 }
+
+
+# ═══════════════════════════════════════════════════════════
+#  CONTENT TOPICS (Instagram niche themes)
+# ═══════════════════════════════════════════════════════════
+
+TOPICS: dict[str, str] = {
+    "travel":      "Travel & Adventure — destinations, landscapes, travel tips",
+    "fashion":     "Fashion & Style — outfits, accessories, trends",
+    "fitness":     "Fitness & Health — workouts, nutrition, wellness",
+    "pets":        "Pets & Animals — cute animals, pet care, pet products",
+    "quotes":      "Quotes & Motivation — inspirational quotes, life wisdom",
+    "food":        "Food & Cooking — recipes, food photography, kitchen tips",
+    "lifestyle":   "Lifestyle & Home — decor, routines, daily life",
+    "tech":        "Tech & Gadgets — gadgets, reviews, digital life",
+    "business":    "Business & Hustle — entrepreneurship, productivity, marketing",
+    "art":         "Art & Creative — artwork, design, DIY projects",
+}
+
+TOPIC_KEYS = list(TOPICS.keys())
 
 
 # ═══════════════════════════════════════════════════════════
@@ -208,57 +230,162 @@ def _gen_pollinations(
     model: str = "",
     seed: Optional[int] = None,
 ) -> str | None:
-    """Generate image via Pollinations.ai (free)."""
+    """Generate image via Pollinations.ai (free). Tries multiple endpoints."""
     encoded = quote(prompt, safe="")
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true"
-    if model and model != "pollinations":
-        url += f"&model={quote(model)}"
+
+    # Strategy 1: New JSON API (OpenAI-compatible)
+    print(f"  [Pollinations] Trying JSON API...")
+    try:
+        import random as _rnd
+        payload = {
+            "model": model or "flux",
+            "prompt": prompt,
+            "n": 1,
+            "size": f"{width}x{height}",
+        }
+        if seed is not None:
+            payload["seed"] = seed
+        resp = requests.post(
+            "https://gen.pollinations.ai/v1/images/generations",
+            headers={
+                "Authorization": "Bearer pollinations",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=90,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            # Try b64_json first, then url
+            img_list = data.get("data", [])
+            if img_list:
+                img = img_list[0]
+                if "b64_json" in img:
+                    import base64
+                    return _save_image(base64.b64decode(img["b64_json"]), prompt, "png")
+                if "url" in img:
+                    img_bytes = _download_image(img["url"])
+                    if img_bytes:
+                        return _save_image(img_bytes, prompt)
+            print(f"  JSON API returned unexpected format")
+    except Exception as e:
+        print(f"  JSON API failed: {e}")
+
+    # Strategy 2: Old URL format with explicit model
+    print(f"  [Pollinations] Trying URL API (flux)...")
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&model=flux"
     if seed is not None:
         url += f"&seed={seed}"
+    data = _download_image(url, timeout=60)
+    if data:
+        return _save_image(data, prompt)
 
-    print(f"  [Pollinations] Generating...")
-    data = _download_image(url, timeout=90)
-    if not data:
+    # Strategy 3: Try without model parameter (let Pollinations choose)
+    print(f"  [Pollinations] Trying URL API (default model)...")
+    url2 = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true"
+    data = _download_image(url2, timeout=60)
+    if data:
+        return _save_image(data, prompt)
+
+    # Strategy 4: Try with enhance=true for better results
+    print(f"  [Pollinations] Trying with enhance...")
+    url3 = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&enhance=true"
+    data = _download_image(url3, timeout=60)
+    if data:
+        return _save_image(data, prompt)
+
+    return None
+
+
+# ── Provider 2: Google Gemini (free — 500 images/day) ──
+
+GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/"
+
+
+def _gen_gemini(
+    prompt: str,
+    width: int = 1080,
+    height: int = 1350,
+    model: str = "",
+) -> str | None:
+    """Generate image via Google Gemini (free tier: 500/day, no credit card)."""
+    if not GEMINI_API_KEY:
+        print("  [Gemini] No API key configured, skipping")
         return None
-    return _save_image(data, prompt)
+
+    model = model or GEMINI_IMAGE_MODEL
+    url = f"{GEMINI_URL}{model}:generateContent?key={GEMINI_API_KEY}"
+
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }],
+        "generationConfig": {
+            "responseModalities": ["IMAGE", "TEXT"],
+        },
+    }
+
+    print(f"  [Gemini] Generating with {model}...")
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        if resp.status_code == 200:
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            for c in candidates:
+                parts = c.get("content", {}).get("parts", [])
+                for p in parts:
+                    inline = p.get("inlineData", {})
+                    if inline.get("mimeType", "").startswith("image/"):
+                        import base64
+                        img_bytes = base64.b64decode(inline["data"])
+                        return _save_image(img_bytes, prompt, "png")
+            # Also try text content for URLs (fallback)
+            for c in candidates:
+                parts = c.get("content", {}).get("parts", [])
+                for p in parts:
+                    text = p.get("text", "")
+                    if text and "http" in text:
+                        print(f"  Gemini returned text (no inline image)")
+        elif resp.status_code == 403:
+            print(f"  [Gemini] 403 Forbidden — API key may be invalid or region-blocked")
+        else:
+            print(f"  [Gemini] API error {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        print(f"  [Gemini] API failed: {e}")
+
+    return None
 
 
-# ── Provider 2: OpenRouter image models ──────────────────
+# ── Provider 3: OpenRouter image models (Chat Completions API) ──
 
 def _gen_openrouter(
     prompt: str,
     width: int = 1080,
     height: int = 1350,
-    model: str = "openai/dall-e-3",
+    model: str = "",
     quality: str = "standard",
 ) -> str | None:
     """
-    Generate image via OpenRouter (requires API key).
-    Supports: openai/dall-e-3, flux, stability-ai, etc.
+    Generate image via OpenRouter Chat Completions API with modalities.
+    Supported models: google/gemini-2.5-flash-image, black-forest-labs/flux.2-klein-4b, etc.
     """
     if not OPENROUTER_API_KEY or OPENROUTER_API_KEY.startswith("your-"):
         print("  [OpenRouter] No API key configured, skipping")
         return None
 
-    # Map model names to OpenRouter's expected format
+    model = model or DEFAULT_IMAGE_MODEL
+
+    # Add size hint to prompt for better results
+    size_hint = ""
+    if "gemini" in model or "imagen" in model:
+        size_hint = f" Image should be {width}x{height} portrait orientation."
+
     payload = {
         "model": model,
-        "prompt": prompt,
-        "n": 1,
+        "messages": [{"role": "user", "content": prompt + size_hint}],
+        "modalities": ["image", "text"],
     }
-
-    # DALL-E specific
-    if "dall-e" in model:
-        size_map = {
-            (1024, 1024): "1024x1024",
-            (1024, 1792): "1024x1792",
-            (1792, 1024): "1792x1024",
-        }
-        s = size_map.get((width, height), "1024x1024")
-        payload["size"] = s
-        payload["quality"] = quality
-    else:
-        payload["size"] = f"{width}x{height}"
 
     print(f"  [OpenRouter] Generating with {model}...")
     try:
@@ -270,20 +397,42 @@ def _gen_openrouter(
         )
         if resp.status_code == 200:
             data = resp.json()
-            # Response format varies by model
-            if "data" in data and len(data["data"]) > 0:
-                img_data = data["data"][0]
-                if "url" in img_data:
-                    img_bytes = _download_image(img_data["url"])
+            message = data.get("choices", [{}])[0].get("message", {})
+
+            # Extract images from response
+            images = message.get("images", [])
+            if images:
+                for i, img in enumerate(images):
+                    img_url = img.get("image_url", {}).get("url", "")
+                    if img_url:
+                        # Usually base64 data URL: data:image/png;base64,...
+                        if img_url.startswith("data:"):
+                            import base64
+                            # Strip MIME header
+                            b64_data = img_url.split(",", 1)[-1]
+                            img_bytes = base64.b64decode(b64_data)
+                            return _save_image(img_bytes, prompt, "png")
+                        elif img_url.startswith("http"):
+                            img_bytes = _download_image(img_url)
+                            if img_bytes:
+                                return _save_image(img_bytes, prompt)
+                        else:
+                            print(f"  Unknown image URL format: {img_url[:60]}...")
+
+            # Some models return text with image URLs
+            content = message.get("content", "")
+            if content and "http" in content:
+                print(f"  Checking content for image URLs...")
+                import re
+                urls = re.findall(r'https?://[^\s<>"]+\.(?:png|jpg|jpeg|webp)', content)
+                for u in urls:
+                    img_bytes = _download_image(u)
                     if img_bytes:
-                        return _save_image(img_bytes, prompt, "png" if "dall-e" in model else "jpg")
-                if "b64_json" in img_data:
-                    import base64
-                    return _save_image(base64.b64decode(img_data["b64_json"]), prompt, "png")
-            if "url" in data:
-                img_bytes = _download_image(data["url"])
-                if img_bytes:
-                    return _save_image(img_bytes, prompt)
+                        return _save_image(img_bytes, prompt)
+
+            print(f"  No images in response. Content: {str(content)[:100]}")
+        elif resp.status_code == 402:
+            print(f"  [OpenRouter] 402 Payment Required — check your API credits")
         else:
             print(f"  OpenRouter image API error {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
@@ -319,7 +468,7 @@ def generate_image(
 
     Args:
         prompt: Image description
-        provider: 'pollinations' | 'openrouter'
+        provider: 'gemini' | 'pollinations' | 'openrouter'
         model: Specific model name (provider-dependent)
         aspect_ratio: '1:1' | '4:5' | '9:16' | '16:9' | '3:2' | '2:3'
         quality: 'standard' | 'hd' (DALL-E only)
@@ -333,18 +482,30 @@ def generate_image(
 
     path = None
 
-    if provider == "openrouter":
-        or_model = model or "openai/dall-e-3"
-        path = _gen_openrouter(prompt, width=w, height=h, model=or_model, quality=quality)
-    else:
-        # Default: pollinations
-        path = _gen_pollinations(prompt, width=w, height=h, model=model, seed=seed)
-
-    if not path:
-        # Fallback: try Pollinations if OpenRouter failed
-        if provider != "pollinations":
-            print("  Falling back to Pollinations.ai...")
+    if provider == "gemini":
+        # Gemini (free — 500/day) → Pollinations → Gemini alt model
+        path = _gen_gemini(prompt, width=w, height=h, model=model)
+        if not path:
+            print("  Gemini failed, trying Pollinations...")
             path = _gen_pollinations(prompt, width=w, height=h, seed=seed)
+        if not path:
+            print("  Trying Gemini alternate model...")
+            path = _gen_gemini(prompt, width=w, height=h, model="gemini-2.0-flash-exp-image-generation")
+    elif provider == "openrouter":
+        or_model = model or DEFAULT_IMAGE_MODEL
+        path = _gen_openrouter(prompt, width=w, height=h, model=or_model, quality=quality)
+        if not path:
+            print("  OpenRouter failed, trying free Gemini...")
+            path = _gen_gemini(prompt, width=w, height=h)
+        if not path:
+            print("  Trying Pollinations...")
+            path = _gen_pollinations(prompt, width=w, height=h, seed=seed)
+    else:
+        # Pollinations (free) → Gemini → Pollinations alt
+        path = _gen_pollinations(prompt, width=w, height=h, model=model, seed=seed)
+        if not path:
+            print("  Pollinations failed, trying Gemini...")
+            path = _gen_gemini(prompt, width=w, height=h)
 
     if not path:
         return None
@@ -495,3 +656,94 @@ def generate_caption(
         if key in product_type.lower() or product_type.lower() in key:
             return FALLBACK_CAPTIONS[key]
     return f"Upgrade your life with this {product_type}! ✨"
+
+
+# ═══════════════════════════════════════════════════════════
+#  HASHTAG GENERATION
+# ═══════════════════════════════════════════════════════════
+
+HASHTAG_CATEGORIES = {
+    "popular": "trending broad-reach hashtags with 100k-1M posts",
+    "niche": "specific long-tail hashtags with 1k-50k posts for better discovery",
+    "mixed": "mix of 40% popular + 60% niche for balanced reach",
+}
+
+FALLBACK_HASHTAGS = {
+    "厨房": "#厨房好物 #厨房神器 #懒人厨房 #料理 #下厨 #美食分享 #homecooking #kitchengadgets #foodie #cookingtips",
+    "家居": "#家居好物 #居家好物 #居家生活 #收纳 #家装 #homedecor #homeorganization #interiordesign",
+    "健身": "#健身 #运动 #减脂 #塑形 #居家健身 #fitness #workout #gymlife #healthylifestyle",
+    "美容": "#护肤 #美妆 #护肤日常 #变美 #skincare #beauty #makeup #glowup #selfcare",
+    "饮品": "#饮品 #夏日饮品 #冰饮 #果汁 #调酒 #drinks #cocktail #juice #refreshing",
+    "default": "#好物推荐 #生活好物 #好物分享 #种草 #好物 #lifestyle #musthave #dailylife",
+}
+
+
+def generate_hashtags(product: str, niche: str = "", category: str = "mixed",
+                      model: str = "qwen/qwen-2.5-7b-instruct") -> str:
+    """
+    Generate Instagram hashtags for a product/niche via OpenRouter LLM.
+    Falls back to curated hashtag lists on failure.
+
+    Args:
+        product: Product name / topic (e.g. "cutting board")
+        niche: Content niche (e.g. "kitchen gadgets")
+        category: "popular", "niche", or "mixed"
+        model: OpenRouter model to use
+
+    Returns:
+        Space-separated hashtag string with # prefix on each tag.
+    """
+    strategy = HASHTAG_CATEGORIES.get(category, HASHTAG_CATEGORIES["mixed"])
+
+    if not OPENROUTER_API_KEY or OPENROUTER_API_KEY.startswith("your-"):
+        return _fallback_hashtags(product, niche)
+
+    prompt = (
+        f"Generate 25 Instagram hashtags for a post about: {product}.\n"
+        f"Niche/context: {niche or 'general lifestyle'}.\n"
+        f"Strategy: {strategy}.\n"
+        f"Requirements:\n"
+        f"- Mix Chinese and English hashtags (about 50/50)\n"
+        f"- Each tag must start with #\n"
+        f"- Space-separated on ONE line\n"
+        f"- No explanation, no numbering, no markdown\n"
+        f"- Include 3-5 brand/community tags\n"
+        f"Output ONLY the hashtags:"
+    )
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 120,
+        "temperature": 0.7,
+    }
+    try:
+        resp = requests.post(CAPTION_URL, headers=CAPTION_HEADERS, json=payload, timeout=15)
+        if resp.status_code == 200:
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+            # Clean up: remove markdown, numbering, extra spaces
+            text = text.replace("\n", " ").replace("  ", " ")
+            # Ensure all tags have #
+            tags = []
+            for t in text.split():
+                t = t.strip().rstrip(",").rstrip(".")
+                if t and not t.startswith("#"):
+                    t = "#" + t
+                if t and len(t) > 1:
+                    tags.append(t)
+            if len(tags) >= 10:
+                return " ".join(tags[:30])
+        print(f"  Hashtag API error {resp.status_code}")
+    except Exception as e:
+        print(f"  Hashtag API failed: {e}")
+
+    return _fallback_hashtags(product, niche)
+
+
+def _fallback_hashtags(product: str, niche: str = "") -> str:
+    """Curated fallback hashtags when API is unavailable."""
+    combined = (niche + " " + product).lower()
+    for keyword, tags in FALLBACK_HASHTAGS.items():
+        if keyword in combined:
+            return tags
+    return FALLBACK_HASHTAGS["default"]

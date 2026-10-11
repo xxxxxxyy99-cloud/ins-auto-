@@ -1,3 +1,5 @@
+"""Configuration — loads .env and exports constants."""
+
 import os
 import sys
 from pathlib import Path
@@ -17,14 +19,6 @@ for p in [BASE_DIR / "data" / ".env", BASE_DIR / ".env", PACKAGE_DIR / "data" / 
         break
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "your-openrouter-api-key-here")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 IG_USERNAME = os.getenv("IG_USERNAME", "your-instagram-username")
 IG_PASSWORD = os.getenv("IG_PASSWORD", "your-instagram-password")
-
-POST_INTERVAL_DAYS = 2
-POST_WINDOW_START = 16
-POST_WINDOW_END = 23
-HASHTAGS = [
-    "#kitchenware", "#cooking", "#homecooking", "#kitchentools",
-    "#cookware", "#foodprep", "#kitchengadgets", "#homechef",
-    "#kitchenlove", "#cookingathome", "#kitchenlife", "#厨具"
-]
