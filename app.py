@@ -33,14 +33,16 @@ from ins账号自动化 import (
 )
 
 from ins账号自动化.config import GEMINI_API_KEY, OPENROUTER_API_KEY
+from ins账号自动化.automation import compute_next_run
 
 log = get_logger("ui")
 
 # ── Page config ────────────────────────────────────────────────
 
+_ICON_PATH = Path(__file__).resolve().parent / "assets" / "app_icon.png"
 st.set_page_config(
     page_title="InsAuto 内容助手",
-    page_icon="🎨",
+    page_icon=str(_ICON_PATH) if _ICON_PATH.exists() else "🎨",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -258,7 +260,7 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    st.caption(f"v2.1 · {datetime.now().strftime('%Y-%m-%d')}")
+    st.caption(f"v2.2 · {datetime.now().strftime('%Y-%m-%d')}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -291,6 +293,16 @@ if st.session_state._page == "dashboard":
         st.markdown(f"""<div class="metric-card">
             <div class="number">{totals.get('errors', 0)}</div>
             <div class="label">❌ 失败数</div></div>""", unsafe_allow_html=True)
+
+    # ── Schedule status ──
+    _sched = get_settings()
+    if str(_sched.get("schedule_enabled", "0")) == "1":
+        _nxt = compute_next_run(_sched)
+        _last = _sched.get("schedule_last_result", "") or "无"
+        if _nxt:
+            st.caption(f"⏰ 定时发布已启用 · 下次: {_nxt:%m-%d %H:%M} · 上次结果: {_last}")
+        else:
+            st.caption("⏰ 定时发布已启用（等待定时服务进程启动）")
 
     # ── Quick Actions ──
     st.markdown("---")
@@ -1305,7 +1317,7 @@ elif st.session_state._page == "settings":
          "⚠️ Gemini Key 未配置（图片质量更好，免费 500 张/天，去 aistudio.google.com 申请后填入 ins账号自动化/data/.env）")
     )
 
-    tab_s1, tab_s2, tab_s3 = st.tabs(["🎯 品牌 & 内容", "🤖 AI 模型", "🏷️ 默认标签"])
+    tab_s1, tab_s2, tab_s3, tab_s4 = st.tabs(["🎯 品牌 & 内容", "🤖 AI 模型", "🏷️ 默认标签", "⏰ 定时发布"])
 
     with tab_s1:
         st.markdown("#### 🎯 品牌信息")
@@ -1349,6 +1361,62 @@ elif st.session_state._page == "settings":
         if st.button("💾 保存标签", key="save_tags"):
             save_settings(hashtags=new_tags)
             st.success("标签已保存")
+
+    with tab_s4:
+        st.markdown("#### ⏰ 定时自动发布")
+        sched_on = st.checkbox(
+            "启用定时自动发布",
+            value=str(s.get("schedule_enabled", "0")) == "1",
+            help="由定时服务进程执行；用桌面面板的「启动定时服务」或双击 启动定时发布.bat 启动")
+        col_sc1, col_sc2, col_sc3 = st.columns(3)
+        with col_sc1:
+            mode_opts = ["interval", "daily"]
+            saved_mode = s.get("schedule_mode", "interval")
+            sched_mode = st.selectbox(
+                "模式", mode_opts,
+                index=mode_opts.index(saved_mode) if saved_mode in mode_opts else 0,
+                format_func=lambda m: "间隔N天" if m == "interval" else "每天")
+        with col_sc2:
+            sched_time = st.text_input("发布时间 (HH:MM)", s.get("scheduled_time", "10:00"))
+        with col_sc3:
+            sched_days = st.number_input(
+                "间隔天数", min_value=1, max_value=30,
+                value=int(s.get("interval_days", "2") or 2))
+        col_sc4, col_sc5, col_sc6 = st.columns(3)
+        with col_sc4:
+            cat_opts = ["(随机)"] + list(DEFAULT_CATEGORIES.keys())
+            saved_cat = s.get("schedule_category", "") or "(随机)"
+            sched_cat = st.selectbox(
+                "产品品类", cat_opts,
+                index=cat_opts.index(saved_cat) if saved_cat in cat_opts else 0)
+        with col_sc5:
+            sched_headless = st.checkbox(
+                "后台运行浏览器", value=str(s.get("scheduler_headless", "0")) == "1",
+                help="勾选后自动发布时不弹出浏览器窗口")
+        with col_sc6:
+            new_limit = st.number_input(
+                "发布标签数量上限", min_value=1, max_value=30,
+                value=int(s.get("publish_hashtag_limit", "15") or 15))
+
+        if st.button("💾 保存定时设置", key="save_schedule"):
+            save_settings(
+                schedule_enabled="1" if sched_on else "0",
+                schedule_mode=sched_mode,
+                scheduled_time=sched_time.strip() or "10:00",
+                interval_days=str(int(sched_days)),
+                schedule_category="" if sched_cat == "(随机)" else sched_cat,
+                scheduler_headless="1" if sched_headless else "0",
+                publish_hashtag_limit=str(int(new_limit)),
+            )
+            st.success("定时设置已保存。定时服务运行中会自动按新设置执行。")
+
+        _nxt_ui = compute_next_run(get_settings())
+        _last_ui = s.get("schedule_last_result", "") or "无"
+        if _nxt_ui:
+            st.caption(f"📅 下次发布: {_nxt_ui:%m-%d %H:%M} ｜ 上次结果: {_last_ui}")
+        else:
+            st.caption(f"⏸ 定时发布未启用 ｜ 上次结果: {_last_ui}")
+        st.caption("💡 启动方式: 桌面面板「▶ 启动定时服务」，或双击 启动定时发布.bat（保持窗口开启）。")
 
     st.markdown("---")
     st.markdown("#### ⚠️ 危险操作")

@@ -1,72 +1,83 @@
 # 🎨 InsAuto — Instagram AI 内容自动化
 
-一键生成产品图片 + AI 文案，自动发布到 Instagram。
+AI 生成产品图片 + 英文文案 + 标签，人工审核后发布，或开启「定时自动发布」全自动运营。
 
 ## 快速开始
 
 ### 1. 安装依赖
 ```bash
 pip install -r requirements.txt
+python -m playwright install chromium
 ```
 
-### 2. 启动
-```bash
-# Web 仪表盘（推荐）
-streamlit run app.py
+### 2. 配置密钥
+把根目录 `.env.example` 的内容复制到 `ins账号自动化/data/.env`，填入：
+- `OPENROUTER_API_KEY`（必需）：https://openrouter.ai/keys
+- `GEMINI_API_KEY`（可选，强烈推荐，免费 500 张/天）：https://aistudio.google.com/apikey
 
-# 或桌面面板
-python launcher.py
-```
+### 3. 启动
+| 方式 | 操作 | 说明 |
+|---|---|---|
+| 桌面控制面板（推荐） | 双击 `启动面板.bat` | 启停网页/定时服务、立即发一条、实时日志 |
+| 网页面板 | 双击 `启动.bat` | http://localhost:8501 |
+| 定时服务 | 双击 `启动定时发布.bat` | 或由桌面面板启动；保持窗口开启 |
 
-浏览器打开 http://localhost:8501 即可使用。
-
-## 两种使用模式
-
-### 🎮 离线模式（无需任何配置）
-- 点击「离线模式」登录
-- 🎬 **图片工作室** → 选产品 → 生成图片（免费 Pollinations.ai）
-- 文案使用内置模板
-- ❌ 不能发布到 Instagram
-
-### 🔐 完整模式
-
-1. **图片生成**
-   - 默认使用 Pollinations.ai（免费，无需 API Key）
-   - 可选 OpenRouter（DALL-E 3 等高质量模型），需配置 API Key
-
-2. **AI 文案**（可选）
-   - 去 [openrouter.ai/keys](https://openrouter.ai/keys) 注册获取 Key
-   - 在项目目录创建 `.env` 文件：
-   ```
-   OPENROUTER_API_KEY=sk-or-v1-你的密钥
-   ```
-
-3. **Instagram 发布**
-   - 登录页填写用户名 + Session ID
-   - Session ID 获取：浏览器打开 Instagram → F12 → Application → Cookies → 复制 sessionid
+### 4. 首次登录 Instagram
+网页面板侧边栏点「🔗 登录」，在弹出的浏览器里登录一次即可；之后会话自动维持（网页、桌面面板、定时服务共用同一会话）。
 
 ## 功能
 
 | 功能 | 说明 |
-|------|------|
-| 🎬 图片工作室 | 选产品、自定义 Prompt、批量生成 |
-| 🖼️ 图片库 | 浏览所有生成图片 |
-| 📋 发布队列 | 管理待发布内容、编辑文案 |
-| ⏱ 定时发布 | 按间隔自动生成+发布 |
-| 🎨 多引擎 | Pollinations(免费) / OpenRouter DALL-E 3 |
-| 📐 多比例 | 1:1 / 4:5 / 9:16 / 16:9 / 3:2 / 2:3 |
-| 🏷️ 多品类 | 厨房、家居、健身、美妆 40+ 产品 |
+|---|---|
+| ✏️ 内容工作室 | 一键生成图片+英文文案+标签；上传图片生成文案；标签工具；批量生产 |
+| 🎨 多图片引擎 | Gemini（推荐）/ Pollinations（免费）/ OpenRouter，生成后自动裁剪为所选比例 |
+| 📋 草稿箱 & 审核中心 | 编辑、提交审核、批准后发布 |
+| 📂 内容管理 | 关键词/主题/标签/状态筛选，多入口一键发布 |
+| ⏰ 定时自动发布 | 间隔 N 天或每天定点，全自动「生成→发布→记录」，关机错过自动补发 |
+| 📊 Dashboard & 统计 | 生成/发布/失败计数、近 30 天趋势、活动日志 |
+| 🖥️ 桌面控制面板 | 管理全部服务，状态一目了然 |
+
+## 定时自动发布说明
+
+1. 在网页面板「设置 → ⏰ 定时发布」或桌面面板里配置：启用、模式（间隔 N 天 / 每天）、时间、品类（可随机）、是否后台运行浏览器。
+2. 启动定时服务（桌面面板按钮，或双击 `启动定时发布.bat`）。服务每 30 秒检查一次，到点自动执行。
+3. 每次自动发布 = 随机选产品 → 生成图片 → 生成英文文案+标签 → 用保存的会话发布 → 计入统计与发布记录。
+4. 失败会写入活动日志（Dashboard 可见）并计入失败数；会话过期时需要重新登录一次。
+5. 同一时刻只会有一个发布任务（锁文件保护，防止重复发布）。
+
+## 文案与提示词
+
+- 文案默认英文：钩子开头 + 短句正文 + 互动收尾（IG 只显示前约 125 字符，钩子决定点击率）。
+- 风格：casual / luxury / fitness / minimal / educational / sale；「文案额外指令」可追加硬性要求。
+- 「内容主题」会同时注入图片、文案、标签三处提示词。
+- 标签中英混合、自动去重；发布时按「发布标签数量上限」（默认 15，最多 30）。
+- 文案/标签模型默认 `google/gemini-2.5-flash`，可在设置里换成 `qwen/qwen3-30b-a3b`（更便宜）等。
 
 ## 项目结构
 
 ```
-├── app.py              # Streamlit Web 仪表盘
-├── launcher.py         # Tkinter 桌面面板
-├── requirements.txt    # Python 依赖
-└── ins账号自动化/       # 核心包
-    ├── content.py      # 图片生成 + AI 文案
-    ├── bot.py          # Instagram 发布
-    ├── automation.py   # 定时自动化
-    ├── db.py           # SQLite 存储
-    └── config.py       # 配置
+├── app.py                  # Streamlit 网页面板
+├── launcher.py             # Tkinter 桌面控制面板
+├── scheduler.py            # 定时服务（循环检查 + 拉起 worker）
+├── worker.py               # 单次自动发布（独立进程，隔离 Playwright）
+├── assets/                 # 应用图标（由 tools/make_logo.py 生成）
+├── tools/make_logo.py      # 图标生成脚本
+├── 启动.bat                # 启动网页面板
+├── 启动面板.bat            # 启动桌面控制面板
+├── 启动定时发布.bat         # 启动定时服务
+└── ins账号自动化/           # 核心包
+    ├── content.py          # 图片生成 + 文案/标签提示词
+    ├── bot.py              # Instagram 登录 / 发布（Playwright）
+    ├── automation.py       # 定时发布管线 + 计划时间计算
+    ├── db.py               # SQLite 存储
+    ├── logger.py           # 活动日志
+    └── config.py           # .env 加载（ins账号自动化/data/.env）
 ```
+
+## 常见问题
+
+- **发布失败 / 提示登录过期**：网页面板侧边栏点「🔌」断开，再点「🔗 登录」重新登录一次。
+- **提示「发布未确认成功」**：查看 `ins账号自动化/data/post_unconfirmed.png` 截图判断实际结果。
+- **图片生成失败**：检查网络与 OpenRouter 余额；配置免费 GEMINI_API_KEY 可大幅提升质量与稳定性。
+- **定时没执行**：确认定时服务在运行（桌面面板有状态灯），且「启用定时自动发布」已勾选。
+- **换电脑**：重装依赖后重新登录一次 Instagram 即可。
