@@ -20,6 +20,8 @@ CAPTION_URL = "https://openrouter.ai/api/v1/chat/completions"
 OR_IMAGE_URL = "https://openrouter.ai/api/v1/chat/completions"
 # Default image model for OpenRouter (Gemini Flash Image — cheap, good quality)
 DEFAULT_IMAGE_MODEL = "google/gemini-2.5-flash-image"
+# Default LLM for captions and hashtags (fast, cheap, strong at CN/EN mix)
+DEFAULT_CAPTION_MODEL = "google/gemini-2.5-flash"
 
 CAPTION_HEADERS = {
     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -92,16 +94,16 @@ FOOD_MAP: dict[str, str] = {
 # ── Scene templates (for Pollinations) ───────────────────
 
 SCENES_PRODUCT = [
-    "Bright flat lay of a {product} on pale marble, fresh ingredients beside it, soft natural light, top-down view, 4K food photography",
+    "Bright flat lay of a {product} with {food} styled nearby on pale marble, soft natural light, top-down view, 4K commercial product photography",
     "Aesthetic kitchen counter with a {product}, morning sunlight streaming in, warm tones, shallow depth of field, lifestyle photo",
     "Close-up of a {product} with condensation droplets, cold refreshing vibe, crisp details, macro photography, 4K",
-    "Hands using a {product}, action shot, golden hour lighting, candid kitchen moment, authentic lifestyle",
-    "Minimalist white kitchen corner featuring a {product}, fresh ingredients scattered nearby, clean composition, hygge aesthetic",
+    "A hand naturally holding a {product}, realistic hand anatomy, action shot, golden hour lighting, candid kitchen moment",
+    "Minimalist white kitchen corner featuring a {product} with {food} scattered nearby, clean composition, hygge aesthetic, 4K",
     "High-end product shot of a {product} on textured stone counter, dramatic side lighting, culinary elegance, 4K",
-    "Rustic wooden table with {product}, soft window light, warm cozy atmosphere, editorial food styling",
+    "Rustic wooden table with {product} and {food}, soft window light, warm cozy atmosphere, editorial food styling",
     "Modern kitchen scene with a {product}, bright airy room, photorealistic product photography, magazine quality",
     "{product} on a dark moody background, spotlight effect, premium product shot, cinematic lighting, 4K",
-    "Summer vibe flat lay with {product}, colorful fruits and ice, vibrant colors, tropical feel, ultra-detailed",
+    "Summer vibe flat lay with {product} and {food}, vibrant colors, tropical feel, ultra-detailed",
 ]
 
 SCENES_BEAUTY = [
@@ -153,12 +155,14 @@ def _get_food(product: str) -> str:
 def generate_prompt(
     product: Optional[str] = None,
     niche: str = "",
-    custom_style: str = "",
     category: str = "kitchen",
+    theme: str = "",
 ) -> tuple[str, str]:
     """
     Generate an image prompt + product name.
     If product is None, picks one from the niche category.
+
+    theme: optional content theme (from TOPICS) woven into the scene.
     """
     if not product:
         cats = DEFAULT_CATEGORIES.get(category, DEFAULT_CATEGORIES["kitchen"])
@@ -168,19 +172,15 @@ def generate_prompt(
     scenes = _pick_scenes(niche or category)
     template = random.choice(scenes)
 
-    # Replace placeholders
-    prompt = template.format(product=product)
-    if "{food}" in prompt:
-        prompt = prompt.format(food=food)
+    # Replace placeholders (templates that do not use {food} ignore it)
+    prompt = template.format(product=product, food=food)
 
-    # Append niche/style modifiers
-    extras = []
+    # Niche / theme modifiers and a quality guard tail
     if niche:
-        extras.append(f"{niche} aesthetic, {niche} lifestyle")
-    if custom_style:
-        extras.append(custom_style)
-    if extras:
-        prompt = f"{prompt}, {', '.join(extras)}"
+        prompt = f"{prompt}, styled for {niche} audience"
+    if theme:
+        prompt = f"{prompt}, theme: {theme}"
+    prompt = f"{prompt}, no text, no watermark, no logo"
 
     return prompt, product
 
@@ -336,9 +336,12 @@ def _gen_gemini(
     model = model or GEMINI_IMAGE_MODEL
     url = f"{GEMINI_URL}{model}:generateContent?key={GEMINI_API_KEY}"
 
+    orient = "portrait" if height > width else ("square" if height == width else "landscape")
+    full_prompt = f"{prompt}. Compose as a {orient} image at {width}x{height}."
+
     payload = {
         "contents": [{
-            "parts": [{"text": prompt}]
+            "parts": [{"text": full_prompt}]
         }],
         "generationConfig": {
             "responseModalities": ["IMAGE", "TEXT"],
@@ -462,6 +465,29 @@ def _gen_openrouter(
 
 # ── Main unified API ─────────────────────────────────────
 
+def _ensure_aspect(path: str, w: int, h: int):
+    """Center-crop the image at `path` to the exact w:h ratio (no upscale)."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            W, H = im.size
+            target = w / h
+            current = W / H
+            if abs(current - target) < 0.01:
+                return
+            if current > target:
+                new_w = int(round(H * target))
+                box = ((W - new_w) // 2, 0, (W - new_w) // 2 + new_w, H)
+            else:
+                new_h = int(round(W / target))
+                box = (0, (H - new_h) // 2, W, (H - new_h) // 2 + new_h)
+            cropped = im.crop(box)
+            cropped.save(path)
+            print(f"  Aspect cropped to {w}:{h} ({cropped.size[0]}x{cropped.size[1]})")
+    except Exception as e:
+        print(f"  Aspect crop skipped: {e}")
+
+
 # Aspect ratio → (width, height)
 ASPECT_RATIOS: dict[str, tuple[int, int]] = {
     "1:1": (1080, 1080),
@@ -529,6 +555,8 @@ def generate_image(
     if not path:
         return None
 
+    _ensure_aspect(path, w, h)
+
     if return_pil:
         try:
             from PIL import Image
@@ -575,42 +603,52 @@ def generate_batch(
 #  CAPTION GENERATION
 # ═══════════════════════════════════════════════════════════
 
+CAPTION_SYSTEM = (
+    "You are a senior Instagram copywriter running a {niche} account. "
+    "You write in English for a global audience. Captions must sound human "
+    "and specific, never generic or salesy. Write in plain text: no hashtags, "
+    "no quotes, no markdown formatting."
+)
+
 CAPTION_STYLES: dict[str, str] = {
     "casual": (
-        "Write a short Instagram caption for a {product} — a kitchen/home product. "
-        "Tone: friendly, relatable, warm. Include 1-2 emojis. "
-        "Make it feel like a friend sharing a life hack. "
-        "Keep under 150 characters. No hashtags. No quotes."
+        "Write an Instagram caption for a {product}, a kitchen/home product. "
+        "Tone: friendly and warm, like a friend sharing a life hack. Use 1-2 emojis. "
+        "Structure: line 1 is a scroll-stopping hook of at most 8 words; "
+        "then 1-2 short lines of detail; end with a light question that invites comments. "
+        "Keep the whole caption under 200 characters."
     ),
     "luxury": (
-        "Write a short Instagram caption for a {product} — a premium lifestyle product. "
-        "Tone: sophisticated, elegant, aspirational. "
-        "Highlight quality, design, and elevated living experience. "
-        "Keep under 150 characters. No hashtags."
+        "Write an Instagram caption for a {product}, a premium lifestyle product. "
+        "Tone: sophisticated, elegant, aspirational. Highlight craft, design and "
+        "elevated living without hype words. Structure: a hook first line, then "
+        "1-2 refined short lines, end with a subtle call to action. Use 0-1 emoji. "
+        "Keep the whole caption under 200 characters."
     ),
     "fitness": (
-        "Write a short Instagram caption for a {product} — a fitness/wellness product. "
-        "Tone: energetic, motivational, health-conscious. "
-        "Connect the product to an active healthy lifestyle. "
-        "Keep under 150 characters. No hashtags."
+        "Write an Instagram caption for a {product}, a fitness/wellness product. "
+        "Tone: energetic, motivational, health-conscious. Connect the product to "
+        "an active lifestyle. Structure: a punchy hook, 1-2 short motivational "
+        "lines, end with a call to action. Use 1-2 emojis. "
+        "Keep the whole caption under 200 characters."
     ),
     "minimal": (
-        "Write a short Instagram caption for a {product}. "
-        "Tone: clean, simple, understated. 0-1 emojis. "
-        "Focus on function and simplicity. "
-        "Keep under 100 characters. No hashtags."
+        "Write an Instagram caption for a {product}. Tone: clean, simple, understated. "
+        "Focus on function and simplicity. Structure: one hook line plus one short "
+        "line, nothing more. No emojis. Keep the whole caption under 120 characters."
     ),
     "educational": (
-        "Write a short Instagram caption for a {product} — a useful home/kitchen gadget. "
-        "Tone: helpful, informative, practical. Include 1 quick tip or fact. "
-        "Teach something useful about using this tool. "
-        "Keep under 150 characters. No hashtags."
+        "Write an Instagram caption for a {product}, a useful home/kitchen gadget. "
+        "Tone: helpful, informative, practical. Structure: a hook, then one quick "
+        "tip or fact about using this tool, end by inviting saves. Use 0-1 emoji. "
+        "Keep the whole caption under 220 characters."
     ),
     "sale": (
-        "Write a short Instagram caption for a {product} — a must-have product. "
-        "Tone: exciting, persuasive. Create urgency and desire. "
-        "Make it feel like a limited opportunity to upgrade daily life. "
-        "Keep under 150 characters. No hashtags."
+        "Write an Instagram caption for a {product}, a must-have product. "
+        "Tone: exciting and persuasive without hype or false claims. Create desire "
+        "and a sense of upgrading daily life. Structure: hook, benefit line, and a "
+        "light urgency call to action. Use 1-2 emojis. "
+        "Keep the whole caption under 180 characters."
     ),
 }
 
@@ -636,28 +674,35 @@ def generate_caption(
     product_type: str,
     style: str = "casual",
     niche: Optional[str] = None,
-    model: str = "qwen/qwen-2.5-7b-instruct",
+    model: str = DEFAULT_CAPTION_MODEL,
     instructions: str = "",
+    theme: str = "",
 ) -> str:
     """
-    Generate a caption using OpenRouter LLM.
+    Generate an English Instagram caption using OpenRouter LLM.
     Falls back to pre-written captions on failure.
     """
     prompt_template = CAPTION_STYLES.get(style, CAPTION_STYLES["casual"])
     prompt = prompt_template.format(product=product_type)
+    if theme:
+        prompt = f"{prompt} Content theme: {theme}."
     if niche:
         prompt = f"{prompt} Target audience: {niche}."
     if instructions:
-        prompt = f"{prompt} Additional instructions: {instructions}"
+        prompt = f"{prompt} Style overrides, follow strictly: {instructions}"
 
     if not OPENROUTER_API_KEY or OPENROUTER_API_KEY.startswith("your-"):
         print("  No OpenRouter API key — using fallback caption")
         return FALLBACK_CAPTIONS.get(product_type, f"Love this {product_type}! ✨")
 
+    system = CAPTION_SYSTEM.format(niche=niche or "lifestyle products")
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 100,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 256,
         "temperature": 0.8,
     }
     try:
@@ -689,16 +734,21 @@ HASHTAG_CATEGORIES = {
 
 FALLBACK_HASHTAGS = {
     "厨房": "#厨房好物 #厨房神器 #懒人厨房 #料理 #下厨 #美食分享 #homecooking #kitchengadgets #foodie #cookingtips",
+    "kitchen": "#厨房好物 #厨房神器 #懒人厨房 #料理 #下厨 #美食分享 #homecooking #kitchengadgets #foodie #cookingtips",
     "家居": "#家居好物 #居家好物 #居家生活 #收纳 #家装 #homedecor #homeorganization #interiordesign",
+    "home": "#家居好物 #居家好物 #居家生活 #收纳 #家装 #homedecor #homeorganization #interiordesign",
     "健身": "#健身 #运动 #减脂 #塑形 #居家健身 #fitness #workout #gymlife #healthylifestyle",
+    "fitness": "#健身 #运动 #减脂 #塑形 #居家健身 #fitness #workout #gymlife #healthylifestyle",
     "美容": "#护肤 #美妆 #护肤日常 #变美 #skincare #beauty #makeup #glowup #selfcare",
+    "beauty": "#护肤 #美妆 #护肤日常 #变美 #skincare #beauty #makeup #glowup #selfcare",
     "饮品": "#饮品 #夏日饮品 #冰饮 #果汁 #调酒 #drinks #cocktail #juice #refreshing",
+    "drinks": "#饮品 #夏日饮品 #冰饮 #果汁 #调酒 #drinks #cocktail #juice #refreshing",
     "default": "#好物推荐 #生活好物 #好物分享 #种草 #好物 #lifestyle #musthave #dailylife",
 }
 
 
 def generate_hashtags(product: str, niche: str = "", category: str = "mixed",
-                      model: str = "qwen/qwen-2.5-7b-instruct") -> str:
+                      model: str = DEFAULT_CAPTION_MODEL, theme: str = "") -> str:
     """
     Generate Instagram hashtags for a product/niche via OpenRouter LLM.
     Falls back to curated hashtag lists on failure.
@@ -708,6 +758,7 @@ def generate_hashtags(product: str, niche: str = "", category: str = "mixed",
         niche: Content niche (e.g. "kitchen gadgets")
         category: "popular", "niche", or "mixed"
         model: OpenRouter model to use
+        theme: Optional content theme woven into the tags
 
     Returns:
         Space-separated hashtag string with # prefix on each tag.
@@ -718,39 +769,47 @@ def generate_hashtags(product: str, niche: str = "", category: str = "mixed",
         return _fallback_hashtags(product, niche)
 
     prompt = (
-        f"Generate 25 Instagram hashtags for a post about: {product}.\n"
+        f"Generate 22 Instagram hashtags for a post about: {product}.\n"
         f"Niche/context: {niche or 'general lifestyle'}.\n"
+        f"Theme: {theme or 'general'}.\n"
         f"Strategy: {strategy}.\n"
         f"Requirements:\n"
-        f"- Mix Chinese and English hashtags (about 50/50)\n"
-        f"- Each tag must start with #\n"
-        f"- Space-separated on ONE line\n"
-        f"- No explanation, no numbering, no markdown\n"
-        f"- Include 3-5 brand/community tags\n"
+        f"- Mix Chinese and English hashtags, about half and half\n"
+        f"- Each tag starts with #, no spaces or punctuation inside a tag\n"
+        f"- English tags fully lowercase\n"
+        f"- No emojis; avoid mega-generic tags like #love or #instagood unless the strategy is popular\n"
+        f"- Roughly 4 broad tags, 12 mid-size tags, rest long-tail niche tags\n"
+        f"- Do not invent brand names\n"
+        f"- Output one single space-separated line, no explanation, no numbering\n"
         f"Output ONLY the hashtags:"
     )
 
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 120,
-        "temperature": 0.7,
+        "max_tokens": 300,
+        "temperature": 0.6,
     }
     try:
-        resp = requests.post(CAPTION_URL, headers=CAPTION_HEADERS, json=payload, timeout=15)
+        resp = requests.post(CAPTION_URL, headers=CAPTION_HEADERS, json=payload, timeout=20)
         if resp.status_code == 200:
             text = resp.json()["choices"][0]["message"]["content"].strip()
             # Clean up: remove markdown, numbering, extra spaces
             text = text.replace("\n", " ").replace("  ", " ")
-            # Ensure all tags have #
+            # Ensure all tags have #, drop duplicates
             tags = []
+            seen = set()
             for t in text.split():
-                t = t.strip().rstrip(",").rstrip(".")
+                t = t.strip().rstrip(",").rstrip(".").rstrip("*")
+                if t.startswith("-"):
+                    t = t.lstrip("-").strip()
                 if t and not t.startswith("#"):
                     t = "#" + t
-                if t and len(t) > 1:
+                key = t.lower()
+                if t and len(t) > 1 and key not in seen:
+                    seen.add(key)
                     tags.append(t)
-            if len(tags) >= 10:
+            if len(tags) >= 8:
                 return " ".join(tags[:30])
         print(f"  Hashtag API error {resp.status_code}")
     except Exception as e:

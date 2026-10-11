@@ -27,7 +27,7 @@ from ins账号自动化 import (
     generate_prompt, generate_image, generate_caption, generate_hashtags,
     build_caption, generate_batch,
     ASPECT_RATIOS, DEFAULT_CATEGORIES, CAPTION_STYLES, TOPICS, TOPIC_KEYS,
-    IMAGE_DIR,
+    IMAGE_DIR, DEFAULT_CAPTION_MODEL,
     login as bot_login, post_photo, SESSION_FILE,
     get_logger,
 )
@@ -153,6 +153,11 @@ def _clear_studio():
     for k in ("edit_caption", "edit_hashtags",
               "edit_upload_caption", "edit_upload_hashtags", "tag_output"):
         st.session_state.pop(k, None)
+
+
+def _theme_of(topic: str) -> str:
+    """Human-readable theme string for prompts, from a TOPICS key."""
+    return TOPICS.get(topic, "") if topic and topic != "无" else ""
 
 
 def _publish_caption(cap: str, tags: str) -> str:
@@ -436,7 +441,8 @@ elif st.session_state._page == "studio":
 
             if gen_btn:
                 with st.spinner("生成中..."):
-                    prompt, product_name = generate_prompt(product=product, niche=nic)
+                    theme = _theme_of(topic_sel)
+                    prompt, product_name = generate_prompt(product=product, niche=nic, theme=theme)
                     st.session_state._studio_prompt = prompt
                     st.session_state._studio_product = product_name
 
@@ -446,13 +452,14 @@ elif st.session_state._page == "studio":
                     st.session_state._studio_image = img_path
 
                     caption = generate_caption(product_name, style=style, niche=nic,
-                                               model=get_settings().get("llm_model", "qwen/qwen-2.5-7b-instruct"),
-                                               instructions=get_settings().get("caption_instructions", ""))
+                                               model=get_settings().get("llm_model", DEFAULT_CAPTION_MODEL),
+                                               instructions=get_settings().get("caption_instructions", ""),
+                                               theme=theme)
                     st.session_state._studio_caption = caption
 
                     # Auto-generate hashtags
                     try:
-                        tags = generate_hashtags(product_name, niche=nic)
+                        tags = generate_hashtags(product_name, niche=nic, theme=theme)
                     except Exception:
                         tags = get_settings().get("hashtags", "")
                     st.session_state._studio_hashtags = tags
@@ -597,16 +604,18 @@ elif st.session_state._page == "studio":
             if gen_upload_btn and st.session_state._studio_image:
                 with st.spinner("AI 分析中..."):
                     prod = upload_product or "product"
+                    up_theme = _theme_of(upload_topic)
                     # Generate caption
                     cap = generate_caption(
                         prod, style=upload_style,
                         niche=get_settings().get("audience", ""),
-                        model=get_settings().get("llm_model", "qwen/qwen-2.5-7b-instruct"),
+                        model=get_settings().get("llm_model", DEFAULT_CAPTION_MODEL),
                         instructions=get_settings().get("caption_instructions", ""),
+                        theme=up_theme,
                     )
                     st.session_state._studio_caption = cap
                     # Generate hashtags
-                    tags = generate_hashtags(prod, niche=get_settings().get("audience", ""))
+                    tags = generate_hashtags(prod, niche=get_settings().get("audience", ""), theme=up_theme)
                     st.session_state._studio_hashtags = tags
                     st.session_state._studio_product = prod
                     st.session_state["edit_upload_caption"] = cap
@@ -734,7 +743,8 @@ elif st.session_state._page == "studio":
                 img = generate_image(prompt, provider=s.get("image_model") or "pollinations")
                 cap = generate_caption(prod, style=s.get("style", "casual"),
                                        niche=s.get("audience", ""),
-                                       model=s.get("llm_model", "qwen/qwen-2.5-7b-instruct"))
+                                       model=s.get("llm_model", DEFAULT_CAPTION_MODEL),
+                                       instructions=s.get("caption_instructions", ""))
                 tags = generate_hashtags(prod, niche=s.get("audience", ""))
 
                 if img:
@@ -904,7 +914,8 @@ elif st.session_state._page == "assets":
                                     a.get("product", "product"),
                                     style=get_settings().get("style", "casual"),
                                     niche=get_settings().get("audience", ""),
-                                    model=get_settings().get("llm_model", "qwen/qwen-2.5-7b-instruct"),
+                                    model=get_settings().get("llm_model", DEFAULT_CAPTION_MODEL),
+                                    instructions=get_settings().get("caption_instructions", ""),
                                 )
                                 st.session_state[f"qp_cap_{a['id']}"] = cap
                                 st.rerun()
@@ -1138,7 +1149,9 @@ elif st.session_state._page == "review":
                                 item.get("product", ""),
                                 style=s.get("style", "casual"),
                                 niche=s.get("audience", ""),
-                                model=s.get("llm_model", "qwen/qwen-2.5-7b-instruct"),
+                                model=s.get("llm_model", DEFAULT_CAPTION_MODEL),
+                                instructions=s.get("caption_instructions", ""),
+                                theme=_theme_of(item.get("topic", "")),
                             )
                             draft_update(item["id"], caption=new_cap)
                         st.success("文案已重新生成")
@@ -1151,6 +1164,7 @@ elif st.session_state._page == "review":
                             new_tags = generate_hashtags(
                                 item.get("product", ""),
                                 niche=s.get("audience", ""),
+                                theme=_theme_of(item.get("topic", "")),
                             )
                             draft_update(item["id"], hashtags=new_tags)
                         st.success("标签已重新生成")
@@ -1314,8 +1328,8 @@ elif st.session_state._page == "settings":
 
     with tab_s2:
         st.markdown("#### 🤖 AI 模型配置")
-        new_llm = st.text_input("文案模型", s.get("llm_model", "qwen/qwen-2.5-7b-instruct"),
-                                 help="OpenRouter 模型 ID")
+        new_llm = st.text_input("文案模型", s.get("llm_model", DEFAULT_CAPTION_MODEL),
+                                 help="OpenRouter 模型 ID，例如 google/gemini-2.5-flash、qwen/qwen3-30b-a3b、deepseek/deepseek-chat")
         _img_opts = ["gemini", "pollinations", "openrouter"]
         _saved_img = s.get("image_model", "gemini")
         new_img = st.selectbox("图片模型", _img_opts,

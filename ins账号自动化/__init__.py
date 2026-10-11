@@ -26,7 +26,7 @@ from .content import (
     build_caption, generate_batch,
     ASPECT_RATIOS, DEFAULT_CATEGORIES, CAPTION_STYLES,
     TOPICS, TOPIC_KEYS,
-    IMAGE_DIR,
+    IMAGE_DIR, DEFAULT_CAPTION_MODEL,
 )
 from .bot import login, post_photo, post_carousel, SESSION_FILE
 from .logger import get_logger

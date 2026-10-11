@@ -43,6 +43,12 @@ def init_db():
         except Exception:
             pass  # column already exists
 
+        # Migration: upgrade the old default caption model (qwen 7B -> gemini flash)
+        conn.execute(
+            "UPDATE settings SET value='google/gemini-2.5-flash' "
+            "WHERE key='llm_model' AND value='qwen/qwen-2.5-7b-instruct'"
+        )
+
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS assets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,7 +158,7 @@ DEFAULT_SETTINGS = {
     "niche": "kitchen gadgets & home bar",
     "style": "casual",
     "audience": "home cooks, juice lovers & cocktail enthusiasts",
-    "llm_model": "qwen/qwen-2.5-7b-instruct",
+    "llm_model": "google/gemini-2.5-flash",
     "image_model": "gemini",
     "hashtags": "#厨房好物 #厨房神器 #家居好物 #懒人厨房 #榨汁 #饮品diy #夏日饮品 #冰饮 #homemade #kitchengadgets #juicebar #summerdrinks",
     "caption_instructions": "",
