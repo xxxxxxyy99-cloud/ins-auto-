@@ -4,7 +4,7 @@ import time
 import random
 from pathlib import Path
 from playwright.sync_api import sync_playwright, Page
-from .config import IG_USERNAME, IG_PASSWORD
+from .config import IG_USERNAME, IG_PASSWORD, IG_PROXY
 from .db import DATA_DIR
 
 SESSION_FILE = DATA_DIR / "ig_session.json"
@@ -107,16 +107,12 @@ def login(
     pwd = password or IG_PASSWORD
 
     pw = sync_playwright().start()
-    browser_args = [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-    ]
 
     # ── Route A: restore saved session (silent) ──
     if SESSION_FILE.exists():
         print("Restoring saved session...")
         try:
-            browser = pw.chromium.launch(headless=False, args=browser_args)
+            browser = _launch(pw, headless=False)
             context = browser.new_context(
                 storage_state=str(SESSION_FILE),
                 user_agent=MOBILE_USER_AGENT,
@@ -124,7 +120,11 @@ def login(
                 device_scale_factor=2,
             )
             page = context.new_page()
-            page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=30000)
+            if not _goto(page, INSTAGRAM_URL):
+                # Network problem — keep the session file, it is not invalid
+                browser.close()
+                pw.stop()
+                raise Exception(NETWORK_HINT)
             time.sleep(3)
 
             if _is_logged_in(page):
@@ -135,15 +135,18 @@ def login(
                 pw.stop()
                 return True
 
+            # Page loaded and we are logged out: session really expired
             print("Saved session expired, need manual login.")
             browser.close()
+            SESSION_FILE.unlink(missing_ok=True)
         except Exception as e:
             print(f"Session restore failed: {e}")
             try:
                 browser.close()
             except Exception:
                 pass
-            SESSION_FILE.unlink(missing_ok=True)
+            if NETWORK_HINT in str(e):
+                raise
 
     # ── Route B: interactive session expired or first-time login ──
     if not interactive:
@@ -166,14 +169,21 @@ def login(
     print("=" * 50)
     print()
 
-    browser = pw.chromium.launch(headless=False, args=browser_args)
+    browser = _launch(pw, headless=False)
     context = browser.new_context(
         user_agent=MOBILE_USER_AGENT,
         viewport={"width": 412, "height": 915},
         device_scale_factor=2,
     )
     page = context.new_page()
-    page.goto(f"{INSTAGRAM_URL}/accounts/login/", wait_until="domcontentloaded", timeout=30000)
+    if not _goto(page, f"{INSTAGRAM_URL}/accounts/login/"):
+        try:
+            page.screenshot(path=str(DATA_DIR / "login_network_fail.png"))
+        except Exception:
+            pass
+        browser.close()
+        pw.stop()
+        raise Exception(NETWORK_HINT)
 
     # Wait for user to login — poll every 1 second, max 5 minutes
     print("  Waiting for login...", flush=True)
@@ -250,11 +260,42 @@ BROWSER_ARGS = [
     "--no-sandbox",
 ]
 
+NETWORK_HINT = (
+    "无法访问 instagram.com（网络超时）。请确认代理/VPN 已开启；"
+    "程序会自动跟随 Windows 系统代理，也可以在 ins账号自动化/data/.env 里"
+    "设置 IG_PROXY=http://127.0.0.1:7890（换成你的代理端口）"
+)
+
+
+def _launch(pw, headless: bool):
+    """Launch Chromium, honoring IG_PROXY (env override or system proxy).
+
+    Playwright's Chromium does not reliably follow the Windows system
+    proxy, so a running local proxy/VPN can silently not apply and
+    instagram.com then times out."""
+    kwargs = dict(headless=headless, args=BROWSER_ARGS)
+    if IG_PROXY:
+        kwargs["proxy"] = {"server": IG_PROXY}
+        print(f"  [browser] using proxy {IG_PROXY}")
+    return pw.chromium.launch(**kwargs)
+
+
+def _goto(page: Page, url: str, attempts: int = 2, timeout_ms: int = 60000) -> bool:
+    """Navigate with retries; returns False on persistent network failure."""
+    for i in range(1, attempts + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            return True
+        except Exception as e:
+            print(f"  Navigation attempt {i}/{attempts} failed: {str(e)[:120]}")
+            time.sleep(2)
+    return False
+
 
 def _new_browser(headless: bool = False):
     """Create a fresh browser + context with saved session. Caller must close."""
     pw = sync_playwright().start()
-    browser = pw.chromium.launch(headless=headless, args=BROWSER_ARGS)
+    browser = _launch(pw, headless)
     ctx_kwargs = dict(
         user_agent=MOBILE_USER_AGENT,
         viewport={"width": 412, "height": 915},
@@ -264,7 +305,8 @@ def _new_browser(headless: bool = False):
         ctx_kwargs["storage_state"] = str(SESSION_FILE)
     context = browser.new_context(**ctx_kwargs)
     page = context.new_page()
-    page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=30000)
+    if not _goto(page, INSTAGRAM_URL):
+        raise Exception(NETWORK_HINT)
     time.sleep(3)
     return pw, browser, context, page
 
