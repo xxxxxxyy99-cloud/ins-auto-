@@ -25,10 +25,12 @@ def _human_delay(label: str = "", min_s: float = 1, max_s: float = 4):
 #  Login
 # ═══════════════════════════════════════════════════════════
 
-MOBILE_USER_AGENT = (
-    "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro Build/UQ1A.240205.004; wv) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/122.0.6261.64 "
-    "Mobile Safari/537.36"
+# Desktop layout: posting exists only in the desktop web UI. The mobile
+# web layout has no post button (its plus icon opens the story composer
+# and the page nudges "use the app").
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
 
 INSTAGRAM_URL = "https://www.instagram.com"
@@ -131,9 +133,8 @@ def login(
             browser = _launch(pw, headless=False)
             context = browser.new_context(
                 storage_state=str(SESSION_FILE),
-                user_agent=MOBILE_USER_AGENT,
-                viewport={"width": 412, "height": 915},
-                device_scale_factor=2,
+                user_agent=DESKTOP_USER_AGENT,
+                viewport={"width": 1280, "height": 900},
             )
             page = context.new_page()
             if not _goto(page, INSTAGRAM_URL):
@@ -195,9 +196,8 @@ def login(
     if page is None:
         browser = _launch(pw, headless=False)
         context = browser.new_context(
-            user_agent=MOBILE_USER_AGENT,
-            viewport={"width": 412, "height": 915},
-            device_scale_factor=2,
+            user_agent=DESKTOP_USER_AGENT,
+            viewport={"width": 1280, "height": 900},
         )
         page = context.new_page()
     if not _goto(page, f"{INSTAGRAM_URL}/accounts/login/"):
@@ -367,14 +367,65 @@ def _wait_for_any(page: Page, selectors, timeout_s: float = 30):
     return None
 
 
+NEW_POST_SELECTORS = [
+    'svg[aria-label="New post"]',
+    'svg[aria-label="New Post"]',
+    'a[href="/create/select/"]',
+    'svg[aria-label="新帖子"]',
+    'svg[aria-label="新貼文"]',
+    'svg[aria-label="加号图标"]',
+    'svg[aria-label="新規投稿"]',
+]
+
+
+def _find_new_post_button(page: Page):
+    """Return (element, selector) for the create button (desktop layout)."""
+    for sel in NEW_POST_SELECTORS:
+        for el in page.query_selector_all(sel):
+            try:
+                if el.is_visible():
+                    return el, sel
+            except Exception:
+                continue
+    return None, None
+
+
+def _dismiss_dialogs(page: Page):
+    """Dismiss Instagram interstitials (notifications prompt etc.) that
+    intercept pointer events over the feed. Never call this while the
+    create dialog is open — Escape would close it too."""
+    for _ in range(2):
+        clicked = False
+        for sel in ['button:has-text("以后再说")', 'button:has-text("以後再說")',
+                    'button:has-text("稍后再说")', 'button:has-text("稍後再說")',
+                    'button:has-text("暂时不要")',
+                    'button:has-text("Not Now")', 'div[role="button"]:has-text("Not Now")',
+                    'button:has-text("暂不")', 'div[role="button"]:has-text("暂不")',
+                    'button:has-text("现在不要")', 'button:has-text("現在不要")']:
+            try:
+                b = page.query_selector(sel)
+                if b and b.is_visible():
+                    b.click()
+                    clicked = True
+                    time.sleep(1)
+            except Exception:
+                continue
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        time.sleep(0.5)
+        if not clicked:
+            break
+
+
 def _new_browser(headless: bool = False):
     """Create a fresh browser + context with saved session. Caller must close."""
     pw = sync_playwright().start()
     browser = _launch(pw, headless)
     ctx_kwargs = dict(
-        user_agent=MOBILE_USER_AGENT,
-        viewport={"width": 412, "height": 915},
-        device_scale_factor=2,
+        user_agent=DESKTOP_USER_AGENT,
+        viewport={"width": 1280, "height": 900},
     )
     if SESSION_FILE.exists():
         ctx_kwargs["storage_state"] = str(SESSION_FILE)
@@ -395,6 +446,7 @@ def _new_browser(headless: bool = False):
             except Exception:
                 pass
             _wait_body(page, 25)
+    _dismiss_dialogs(page)
     try:
         if len((page.inner_text("body") or "").strip()) < 10:
             print("  WARNING: Instagram 页面正文为空，静态资源可能被拦截。若浏览器窗口一直"
@@ -406,14 +458,25 @@ def _new_browser(headless: bool = False):
 
 
 NEXT_BUTTON_SELECTORS = [
+    'div[role="dialog"] [aria-label="下一步"]',
+    'div[role="dialog"] button:has-text("下一步")',
+    'div[role="dialog"] div[role="button"]:has-text("下一步")',
+    'div[role="dialog"] [aria-label="Next"]',
+    'div[role="dialog"] button:has-text("Next")',
+    'div[role="dialog"] div[role="button"]:has-text("Next")',
     'div[role="button"]:has-text("Next")',
     'button:has-text("Next")',
     'div[role="button"]:has-text("下一步")',
+    'button:has-text("下一步")',
     'div[role="button"]:has-text("次へ")',
     '[aria-label="Next"]',
+    '[aria-label="下一步"]',
 ]
 
 SHARE_BUTTON_SELECTORS = [
+    'div[role="dialog"] div[role="button"]:has-text("Share")',
+    'div[role="dialog"] button:has-text("分享")',
+    'div[role="dialog"] [aria-label="分享"]',
     'div[role="button"]:has-text("Share")',
     'button:has-text("Share")',
     'div[role="button"]:has-text("共有")',
@@ -507,24 +570,24 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
         # ── Step 1: Click "New post" → handle menu → upload file ──
         _human_delay("pre_new_post", random.uniform(2, 5))
 
-        new_post_sel = None
-        for sel in [
-            'svg[aria-label="New post"]', 'svg[aria-label="New Post"]',
-            'svg[aria-label="加号图标"]', 'svg[aria-label="新規投稿"]',
-        ]:
-            el = page.query_selector(sel)
-            if el:
-                new_post_sel = sel
-                break
-
-        if not new_post_sel:
+        _dismiss_dialogs(page)
+        new_btn, new_post_sel = _find_new_post_button(page)
+        if not new_btn:
             raise Exception("New post button not found — are you logged in?")
 
-        # Set up file chooser BEFORE clicking the button
+        # Set up file chooser BEFORE clicking the button. On the desktop
+        # layout the create dialog usually opens instead of a chooser, so
+        # a short timeout here is expected — the hidden input below handles it.
         try:
-            with page.expect_file_chooser(timeout=60000) as fc:
-                page.click(new_post_sel)
-                print(f"  Clicked {new_post_sel}, waiting for file chooser...")
+            with page.expect_file_chooser(timeout=8000) as fc:
+                try:
+                    new_btn.click(timeout=8000)
+                except Exception:
+                    # an overlay (notifications prompt etc.) may intercept
+                    print("  Click intercepted, dismissing overlays and retrying...")
+                    _dismiss_dialogs(page)
+                    new_btn.click(timeout=15000)
+                print(f"  Clicked {new_post_sel}")
 
                 # Instagram may show a "Create" menu first
                 _human_delay("check_menu", 1, 2)
@@ -541,15 +604,31 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
             fc.value.set_files(image_path)
             print(f"  Uploaded: {image_path}")
         except Exception as e:
-            # Fallback: hidden input
-            print(f"  File chooser failed ({e}), trying hidden input...")
+            # Desktop create dialog: a hidden file input appears inside it
+            # (can take ~15-60s on a slow network), or pick via the button.
+            print(f"  No file chooser ({str(e)[:80]}), using the create dialog...")
             fi = page.locator('input[type="file"]')
+            deadline = time.time() + 60
+            while time.time() < deadline and fi.count() == 0:
+                time.sleep(1)
             if fi.count() > 0:
                 fi.first.set_input_files(image_path)
                 print(f"  Uploaded via hidden input: {image_path}")
             else:
-                page.screenshot(path=str(DATA_DIR / "debug_upload_fail.png"))
-                raise Exception("Cannot upload file — no file chooser or input found")
+                sel_btn = _wait_for_any(page, [
+                    'button:has-text("从电脑中选择")', 'button:has-text("從電腦中選擇")',
+                    'button:has-text("Select from computer")',
+                    'div[role="button"]:has-text("从电脑中选择")',
+                ], timeout_s=15)
+                if sel_btn:
+                    print("  Clicking 从电脑中选择...")
+                    with page.expect_file_chooser(timeout=60000) as fc2:
+                        sel_btn.click()
+                    fc2.value.set_files(image_path)
+                    print(f"  Uploaded: {image_path}")
+                else:
+                    page.screenshot(path=str(DATA_DIR / "debug_upload_fail.png"))
+                    raise Exception("Cannot upload file — no file chooser or input found")
 
         _human_delay("after_upload", 3, 6)
 
@@ -579,6 +658,7 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
             'textarea[placeholder="Write a caption..."]',
             'textarea[aria-label="キャプションを入力..."]',
             'textarea[aria-label="输入说明文字..."]',
+            '[aria-label*="说明文字"]',
             'div[role="textbox"]',
         ]
         caption_box = None
