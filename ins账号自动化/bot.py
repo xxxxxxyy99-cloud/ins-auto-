@@ -308,6 +308,13 @@ def _new_browser(headless: bool = False):
     if not _goto(page, INSTAGRAM_URL):
         raise Exception(NETWORK_HINT)
     time.sleep(3)
+    try:
+        if len((page.inner_text("body") or "").strip()) < 10:
+            print("  WARNING: Instagram 页面正文为空，静态资源可能被拦截。若浏览器窗口一直"
+                  "停在启动画面（Meta 标志页），请检查代理分流规则：让 *.cdninstagram.com 和 "
+                  "*.fbcdn.net 也走代理（可先在 Clash 用全局模式验证）。")
+    except Exception:
+        pass
     return pw, browser, context, page
 
 
