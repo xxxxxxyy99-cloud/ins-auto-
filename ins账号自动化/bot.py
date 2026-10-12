@@ -166,18 +166,16 @@ def login(
     # ── Route B: interactive session expired or first-time login ──
     if not interactive:
         try:
+            browser.close()
+        except Exception:
+            pass
+        try:
             pw.stop()
         except Exception:
             pass
         raise Exception(
             "Session expired and not in interactive mode. "
             "Please log in manually through the Streamlit dashboard first."
-        )
-
-    if not pwd or pwd == "your-instagram-password":
-        raise Exception(
-            "No saved session and no password configured.\n"
-            "请先通过 Streamlit 界面登录一次，或编辑 data/.env 设置 IG_USERNAME 和 IG_PASSWORD"
         )
 
     # ── Manual login: open browser, auto-detect when user logs in ──
@@ -213,6 +211,9 @@ def login(
     for i in range(600):
         time.sleep(1)
         try:
+            if page.is_closed():
+                print("  Browser window was closed before login was completed.")
+                break
             if _is_logged_in(page):
                 logged_in = True
                 print(f"  Login detected after {i}s")
@@ -251,8 +252,8 @@ def login(
             pass
         pw.stop()
         raise Exception(
-            "Login timed out (10 minutes). "
-            f"Browser closed. Screenshot: {DATA_DIR / 'login_timeout.png'}"
+            "Login was not completed (browser window closed or timed out after 10 minutes). "
+            f"Screenshot (if any): {DATA_DIR / 'login_timeout.png'}"
         )
 
     # Save session
