@@ -1,6 +1,5 @@
 """Multi-provider image generation + AI caption generation."""
 
-import io
 import random
 import hashlib
 import time
@@ -566,37 +565,6 @@ def generate_image(
             return path
 
     return path
-
-
-def generate_batch(
-    prompt: str,
-    count: int = 3,
-    provider: str = "pollinations",
-    model: str = "",
-    aspect_ratio: str = "4:5",
-) -> list[str]:
-    """
-    Generate multiple image variants from the same prompt.
-    Uses different seeds for variety.
-    """
-    results = []
-    for i in range(count):
-        seed = random.randint(1, 2_000_000_000)
-        print(f"  Batch {i+1}/{count} (seed={seed})...")
-        path = generate_image(
-            prompt=prompt,
-            provider=provider,
-            model=model,
-            aspect_ratio=aspect_ratio,
-            seed=seed if provider == "pollinations" else None,
-        )
-        if path:
-            results.append(str(path))
-        else:
-            print(f"  Batch {i+1}/{count} failed")
-        if i < count - 1:
-            time.sleep(1)  # Rate limit cushion
-    return results
 
 
 # ═══════════════════════════════════════════════════════════

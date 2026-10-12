@@ -61,7 +61,7 @@ python -m playwright install chromium
 ├── scheduler.py            # 定时服务（循环检查 + 拉起 worker）
 ├── worker.py               # 单次自动发布（独立进程，隔离 Playwright）
 ├── assets/                 # 应用图标（由 tools/make_logo.py 生成）
-├── tools/make_logo.py      # 图标生成脚本
+├── tools/                  # 工具：图标生成 / 不发帖彩排 / 页面冒烟测试
 ├── 启动.bat                # 启动网页面板
 ├── 启动面板.bat            # 启动桌面控制面板
 ├── 启动定时发布.bat         # 启动定时服务

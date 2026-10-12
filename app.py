@@ -16,26 +16,23 @@ except Exception:
 from ins账号自动化 import (
     asset_add, asset_get_all, asset_toggle_favorite, asset_delete,
     asset_count, asset_get_by_category,
-    draft_save, draft_get_all, draft_get, draft_update, draft_delete,
+    draft_save, draft_get_all, draft_update, draft_delete,
     draft_mark_posted, draft_count,
     draft_submit_review, draft_approve, draft_reject, review_count,
     draft_search,
-    get_history, add_to_history, clear_history, history_count,
+    get_history, add_to_history, clear_history,
     get_settings, save_settings,
     analytics_totals, analytics_overview, analytics_increment,
-    get_recent_activity, init_db, log_event,
+    get_recent_activity, log_event,
     generate_prompt, generate_image, generate_caption, generate_hashtags,
-    build_caption, generate_batch,
+    build_caption,
     ASPECT_RATIOS, DEFAULT_CATEGORIES, CAPTION_STYLES, TOPICS, TOPIC_KEYS,
     IMAGE_DIR, DEFAULT_CAPTION_MODEL,
     login as bot_login, post_photo, SESSION_FILE,
-    get_logger,
 )
 
 from ins账号自动化.config import GEMINI_API_KEY, OPENROUTER_API_KEY
 from ins账号自动化.automation import compute_next_run
-
-log = get_logger("ui")
 
 # ── Page config ────────────────────────────────────────────────
 
@@ -62,13 +59,6 @@ st.markdown("""
     .metric-card .number { font-size: 2rem; font-weight: 700; color: #e6edf3; line-height: 1.2; }
     .metric-card .label { font-size: 0.8rem; color: #8b949e; margin-top: 0.3rem; }
 
-    .img-card {
-        background: #161b22; border: 1px solid #30363d;
-        border-radius: 10px; overflow: hidden; margin-bottom: 0.8rem;
-    }
-    .img-card img { width: 100%; object-fit: cover; }
-    .img-card .info { padding: 0.6rem 0.8rem; font-size: 0.8rem; color: #8b949e; }
-
     .section-title { font-size: 1.3rem; font-weight: 700; color: #e6edf3; margin: 1rem 0 0.5rem; }
 
     .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 20px; font-size: 0.75rem; font-weight: 600; }
@@ -84,14 +74,6 @@ st.markdown("""
     .stTextArea > div > div > textarea,
     .stSelectbox > div > div { border-radius: 8px !important; }
 
-    /* Phone preview frame */
-    .phone-frame {
-        background: #000; border: 3px solid #30363d; border-radius: 24px;
-        padding: 8px; max-width: 320px; margin: 0 auto;
-    }
-    .phone-frame img { border-radius: 12px; width: 100%; }
-    .phone-frame .caption-text { color: #e6edf3; font-size: 0.85rem; padding: 8px 4px;
-        white-space: pre-wrap; word-break: break-word; line-height: 1.4; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -105,7 +87,6 @@ DEFAULTS = {
     "_studio_image": "",
     "_studio_caption": "",
     "_studio_hashtags": "",
-    "_gen_history": [],
     "_login_start_time": 0.0,
     "_login_pending": False,
 }
@@ -494,8 +475,6 @@ elif st.session_state._page == "studio":
                         analytics_increment("generated")
                     else:
                         st.error("❌ 图片生成失败：所有引擎都不可用。请检查网络，或配置 GEMINI_API_KEY / OpenRouter 余额。")
-
-                    st.session_state._gen_history.append((img_path, product_name, prompt))
 
         with col_right:
             st.markdown("#### 👁️ 预览")

@@ -121,11 +121,6 @@ def history_add(image_path: str, caption: str, product: str):
         )
 
 
-def history_count() -> int:
-    with tx() as conn:
-        return conn.execute("SELECT COUNT(*) FROM history").fetchone()[0]
-
-
 def history_clear():
     with tx() as conn:
         conn.execute("DELETE FROM history")
@@ -306,12 +301,6 @@ def draft_get_all(status: str = "") -> list[dict]:
         else:
             rows = conn.execute("SELECT * FROM drafts ORDER BY updated_at DESC").fetchall()
         return [dict(r) for r in rows]
-
-
-def draft_get(draft_id: int) -> dict | None:
-    with tx() as conn:
-        row = conn.execute("SELECT * FROM drafts WHERE id=?", (draft_id,)).fetchone()
-        return dict(row) if row else None
 
 
 def draft_update(draft_id: int, **kwargs):
