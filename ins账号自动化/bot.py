@@ -108,6 +108,10 @@ def login(
 
     pw = sync_playwright().start()
 
+    browser = None
+    context = None
+    page = None
+
     # ── Route A: restore saved session (silent) ──
     if SESSION_FILE.exists():
         print("Restoring saved session...")
@@ -135,9 +139,9 @@ def login(
                 pw.stop()
                 return True
 
-            # Page loaded and we are logged out: session really expired
-            print("Saved session expired, need manual login.")
-            browser.close()
+            # Page loaded and we are logged out: session really expired.
+            # Keep this window open and continue with the manual login here.
+            print("Saved session expired — continuing with manual login in this window.")
             SESSION_FILE.unlink(missing_ok=True)
         except Exception as e:
             print(f"Session restore failed: {e}")
@@ -145,11 +149,16 @@ def login(
                 browser.close()
             except Exception:
                 pass
+            browser = context = page = None
             if NETWORK_HINT in str(e):
                 raise
 
     # ── Route B: interactive session expired or first-time login ──
     if not interactive:
+        try:
+            pw.stop()
+        except Exception:
+            pass
         raise Exception(
             "Session expired and not in interactive mode. "
             "Please log in manually through the Streamlit dashboard first."
@@ -169,13 +178,14 @@ def login(
     print("=" * 50)
     print()
 
-    browser = _launch(pw, headless=False)
-    context = browser.new_context(
-        user_agent=MOBILE_USER_AGENT,
-        viewport={"width": 412, "height": 915},
-        device_scale_factor=2,
-    )
-    page = context.new_page()
+    if page is None:
+        browser = _launch(pw, headless=False)
+        context = browser.new_context(
+            user_agent=MOBILE_USER_AGENT,
+            viewport={"width": 412, "height": 915},
+            device_scale_factor=2,
+        )
+        page = context.new_page()
     if not _goto(page, f"{INSTAGRAM_URL}/accounts/login/"):
         try:
             page.screenshot(path=str(DATA_DIR / "login_network_fail.png"))
@@ -185,60 +195,54 @@ def login(
         pw.stop()
         raise Exception(NETWORK_HINT)
 
-    # Wait for user to login — poll every 1 second, max 5 minutes
-    print("  Waiting for login...", flush=True)
+    # Wait for the user to log in. Never navigate while a login or
+    # challenge form is on screen — that would wipe what the user typed.
+    print("  Waiting for login (up to 10 minutes)...", flush=True)
     logged_in = False
     last_check_url = ""
-    for i in range(300):
+    for i in range(600):
         time.sleep(1)
         try:
-            url = page.url
-
-            # Check 1: Inline — are we already logged in?
             if _is_logged_in(page):
                 logged_in = True
-                print(f"  Login detected after {i}s (inline check)")
+                print(f"  Login detected after {i}s")
                 break
 
-            # Check 2: URL changed away from login page?
-            if "accounts/login" not in url and "challenge" not in url:
-                if url != last_check_url or i % 5 == 0:
-                    try:
-                        page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=10000)
-                        time.sleep(2)
-                    except Exception:
-                        pass
-                    last_check_url = page.url
-                    if _is_logged_in(page):
-                        logged_in = True
-                        print(f"  Login detected after {i}s (URL: {url[:80]})")
-                        break
+            url = page.url
+            on_auth_page = ("accounts/login" in url) or ("challenge" in url)
 
-            # Check 3: Periodic full check (every 10s)
-            if i % 10 == 0 and i > 0:
+            if not on_auth_page and (url != last_check_url or i % 5 == 0):
+                # The user navigated away from the login form — verify session
                 try:
-                    page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=10000)
+                    page.goto(INSTAGRAM_URL, wait_until="domcontentloaded", timeout=15000)
                     time.sleep(2)
-                    if _is_logged_in(page):
-                        logged_in = True
-                        print(f"  Login detected after {i}s (periodic check)")
-                        break
                 except Exception:
                     pass
+                last_check_url = page.url
+                if _is_logged_in(page):
+                    logged_in = True
+                    print(f"  Login detected after {i}s (redirect: {url[:80]})")
+                    break
 
-            if i % 30 == 0 and i > 0:
-                print(f"  [{i}s] Still waiting... URL={url[:80]}")
+            if i > 0 and i % 30 == 0:
+                print(f"  [{i}s] Still waiting for login... (page: {url[:80]})")
         except Exception:
             pass
     print()
 
     if not logged_in:
-        page.screenshot(path=str(DATA_DIR / "login_timeout.png"))
-        browser.close()
+        try:
+            page.screenshot(path=str(DATA_DIR / "login_timeout.png"))
+        except Exception:
+            pass
+        try:
+            browser.close()
+        except Exception:
+            pass
         pw.stop()
         raise Exception(
-            "Login timed out (5 min). Browser closed. "
-            f"Check screenshot: {DATA_DIR / 'login_timeout.png'}"
+            "Login timed out (10 minutes). "
+            f"Browser closed. Screenshot: {DATA_DIR / 'login_timeout.png'}"
         )
 
     # Save session
