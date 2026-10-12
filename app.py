@@ -114,6 +114,11 @@ for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
+# Restore an existing Instagram session into the UI state early, so the
+# sidebar renders the correct state on the very first load.
+if not st.session_state.authenticated and SESSION_FILE.exists():
+    st.session_state.authenticated = True
+
 
 # ═══════════════════════════════════════════════════════════════
 #  HELPERS
@@ -204,7 +209,9 @@ with st.sidebar:
             try:
                 bot_login(interactive=True)
                 st.session_state.authenticated = True
+                log_event("login_success", message="Instagram 登录成功")
             except Exception as e:
+                log_event("login_failed", message=str(e)[:200], severity="error")
                 st.error(f"登录失败: {e}")
             st.session_state._login_pending = False
             st.session_state._login_start_time = 0
@@ -1427,10 +1434,5 @@ elif st.session_state._page == "settings":
         st.warning("设置已重置，刷新后生效。")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  INIT
-# ═══════════════════════════════════════════════════════════════
-
-# Auto-restore session on startup
-if not st.session_state.authenticated and SESSION_FILE.exists():
-    st.session_state.authenticated = True
+# (session auto-restore now happens at the top of the script,
+#  before the sidebar renders)

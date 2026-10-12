@@ -81,7 +81,9 @@ def _is_logged_in(page: Page) -> bool:
 
         # Signal 4: Feed-specific elements
         for text_sel in ['span:has-text("Following")', 'span:has-text("For you")',
-                         'span:has-text("关注")', 'span:has-text("推荐")']:
+                         'span:has-text("关注")', 'span:has-text("推荐")',
+                         'span:has-text("你的快拍")', 'span:has-text("快拍")',
+                         'span:has-text("Your story")']:
             if page.query_selector(text_sel):
                 return True
 
@@ -153,6 +155,10 @@ def login(
             # Keep this window open and continue with the manual login here.
             print("Saved session expired — continuing with manual login in this window.")
             SESSION_FILE.unlink(missing_ok=True)
+            try:
+                context.clear_cookies()
+            except Exception:
+                pass
         except Exception as e:
             print(f"Session restore failed: {e}")
             try:
@@ -213,6 +219,17 @@ def login(
         try:
             if page.is_closed():
                 print("  Browser window was closed before login was completed.")
+                break
+            if _has_session_cookie(context):
+                # Auth cookie exists: login succeeded even if the page
+                # itself is slow to render. Save immediately.
+                logged_in = True
+                print(f"  Login detected after {i}s (session cookie)")
+                try:
+                    context.storage_state(path=str(SESSION_FILE))
+                    print("  Session saved.")
+                except Exception as e:
+                    print(f"  Session save failed: {e}")
                 break
             if _is_logged_in(page):
                 logged_in = True
@@ -307,6 +324,34 @@ def _goto(page: Page, url: str, attempts: int = 2, timeout_ms: int = 60000) -> b
     return False
 
 
+def _wait_body(page: Page, timeout_s: int = 20) -> bool:
+    """Wait until the page has rendered visible content."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            if len((page.inner_text("body") or "").strip()) > 50:
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def _has_session_cookie(context) -> bool:
+    """True when Instagram's auth cookie exists.
+
+    The login response sets the sessionid cookie regardless of whether
+    the page itself renders, so this is the most reliable success signal
+    on a flaky network."""
+    try:
+        for c in context.cookies():
+            if c.get("name") == "sessionid" and (c.get("value") or "").strip():
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _new_browser(headless: bool = False):
     """Create a fresh browser + context with saved session. Caller must close."""
     pw = sync_playwright().start()
@@ -322,7 +367,14 @@ def _new_browser(headless: bool = False):
     page = context.new_page()
     if not _goto(page, INSTAGRAM_URL):
         raise Exception(NETWORK_HINT)
-    time.sleep(3)
+    time.sleep(2)
+    if not _wait_body(page):
+        print("  Page did not finish loading, reloading once...")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=45000)
+        except Exception:
+            pass
+        _wait_body(page, 15)
     try:
         if len((page.inner_text("body") or "").strip()) < 10:
             print("  WARNING: Instagram 页面正文为空，静态资源可能被拦截。若浏览器窗口一直"
