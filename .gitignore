@@ -18,6 +18,9 @@ browser_profile/
 debug_*.png
 debug_*.html
 
+# Runtime data (database, sessions, debug screenshots)
+ins账号自动化/data/
+
 # Generated images
 generated_images/
 

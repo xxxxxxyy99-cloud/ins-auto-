@@ -37,19 +37,28 @@ INSTAGRAM_URL = "https://www.instagram.com"
 def _is_logged_in(page: Page) -> bool:
     """Check if the current page is logged into Instagram (language-agnostic).
 
-    Uses multiple signals — any one can indicate logged-in state.
+    Negative checks run first: the logged-out login view also contains
+    /accounts/ links (forgot password, sign up), which previously caused
+    false positives and made a dead session look valid.
     """
     try:
-        # Signal 1: Login form is visible → definitely NOT logged in
-        if page.query_selector('input[name="username"]') is not None:
+        url = page.url or ""
+
+        # Auth / challenge pages are never logged in
+        if any(bad in url for bad in ("/accounts/login", "/accounts/emailsignup",
+                                      "/accounts/password", "/challenge",
+                                      "/accounts/suspended")):
             return False
-        if page.query_selector('input[name="password"]') is not None:
-            return False
-        # "Log in" button text
+
+        # Login form on screen → definitely NOT logged in
+        for sel in ('input[name="username"]', 'input[name="password"]',
+                    'input[type="password"]', 'a[href*="password/reset"]'):
+            if page.query_selector(sel) is not None:
+                return False
         login_btn = page.query_selector('button[type="submit"]')
         if login_btn:
             text = (login_btn.text_content() or "").lower()
-            if "log in" in text:
+            if "log in" in text or "登录" in text or "ログイン" in text:
                 return False
 
         # Signal 2: SVG navigation icons (language-agnostic)
@@ -63,10 +72,12 @@ def _is_logged_in(page: Page) -> bool:
         if set(labels) & nav_markers:
             return True
 
-        # Signal 3: Profile link (logged-in users always have this)
-        profile = page.query_selector('a[href*="/accounts/"]')
-        if profile:
-            return True
+        # Signal 3: Profile link — but never an auth link
+        for a in page.query_selector_all('a[href*="/accounts/"]'):
+            href = (a.get_attribute("href") or "").lower()
+            if not any(k in href for k in ("login", "password", "signup",
+                                           "emailsignup", "register")):
+                return True
 
         # Signal 4: Feed-specific elements
         for text_sel in ['span:has-text("Following")', 'span:has-text("For you")',
@@ -75,7 +86,6 @@ def _is_logged_in(page: Page) -> bool:
                 return True
 
         # Signal 5: Post-login URL patterns
-        url = page.url
         if any(ind in url for ind in ['/direct/', '/stories/', '/explore/']):
             return True
 
