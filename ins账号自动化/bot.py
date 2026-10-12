@@ -685,6 +685,20 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
 
         if caption_box:
             _type_caption(page, caption_box, caption)
+            # Verify the caption actually landed; retry once, but never
+            # block the post on verification alone.
+            try:
+                time.sleep(0.5)
+                got = caption_box.evaluate("el => el.value || el.textContent || ''")
+                if len((got or "").strip()) < min(10, max(3, len(caption) // 3)):
+                    print("  Caption did not land; retrying...")
+                    caption_box.click()
+                    page.keyboard.insert_text(caption)
+                    time.sleep(0.5)
+                    got = caption_box.evaluate("el => el.value || el.textContent || ''")
+                    print(f"  Caption after retry: {len((got or '').strip())} chars")
+            except Exception as e:
+                print(f"  Caption verification skipped: {str(e)[:60]}")
         else:
             print("  WARNING: Caption box not found, posting without caption")
 
