@@ -390,6 +390,30 @@ def _find_new_post_button(page: Page):
     return None, None
 
 
+def _find_share_button(page: Page):
+    """Return the publish button: the topmost visible 分享/Share match.
+
+    The dialog header holds it at the top-right, while feed elements
+    behind the overlay (share icons) can also match; preferring the
+    highest match keeps us on the dialog, and at equal height the
+    rightmost wins."""
+    cands = []
+    for sel in SHARE_BUTTON_SELECTORS:
+        for el in page.query_selector_all(sel):
+            try:
+                if not el.is_visible():
+                    continue
+                bb = el.bounding_box()
+                if bb:
+                    cands.append((bb["y"], -bb["x"], el))
+            except Exception:
+                continue
+    if not cands:
+        return None
+    cands.sort(key=lambda t: (t[0], t[1]))
+    return cands[0][2]
+
+
 def _dismiss_dialogs(page: Page):
     """Dismiss Instagram interstitials (notifications prompt etc.) that
     intercept pointer events over the feed. Never call this while the
@@ -479,14 +503,19 @@ NEXT_BUTTON_SELECTORS = [
 ]
 
 SHARE_BUTTON_SELECTORS = [
-    'div[role="dialog"] div[role="button"]:has-text("Share")',
     'div[role="dialog"] button:has-text("分享")',
+    'div[role="dialog"] div[role="button"]:has-text("分享")',
     'div[role="dialog"] [aria-label="分享"]',
-    'div[role="button"]:has-text("Share")',
-    'button:has-text("Share")',
-    'div[role="button"]:has-text("共有")',
+    'button:has-text("分享")',
     'div[role="button"]:has-text("分享")',
+    '[aria-label="分享"]',
+    'div[role="dialog"] button:has-text("Share")',
+    'div[role="dialog"] div[role="button"]:has-text("Share")',
+    'div[role="dialog"] [aria-label="Share"]',
+    'button:has-text("Share")',
+    'div[role="button"]:has-text("Share")',
     '[aria-label="Share"]',
+    'div[role="button"]:has-text("共有")',
 ]
 
 POST_SUCCESS_MARKERS = [
@@ -705,17 +734,29 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
         _human_delay("before_share", 2, 4)
 
         # ── Step 4: Click Share ──
+        # Look for the publish button for up to 60s: right after typing a
+        # caption its suggestion dropdown is open and on slow links the
+        # header can take a moment to settle.
+        share_btn = None
+        deadline = time.time() + 60
+        while time.time() < deadline and not share_btn:
+            share_btn = _find_share_button(page)
+            if not share_btn:
+                time.sleep(2)
+
         share_clicked = False
-        for sel in SHARE_BUTTON_SELECTORS:
+        if share_btn:
             try:
-                btn = page.wait_for_selector(sel, timeout=5000)
-                if btn and btn.is_visible() and btn.is_enabled():
-                    btn.click()
-                    share_clicked = True
-                    print(f"  Clicked Share: {sel}")
-                    break
+                share_btn.click(timeout=10000)
+                share_clicked = True
+                print("  Clicked Share")
             except Exception:
-                continue
+                try:
+                    share_btn.click(force=True, timeout=5000)
+                    share_clicked = True
+                    print("  Clicked Share (forced)")
+                except Exception as e:
+                    print(f"  Share click failed: {str(e)[:80]}")
 
         if not share_clicked:
             raise Exception("Share button not found or not clickable")
