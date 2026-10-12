@@ -458,6 +458,9 @@ def _new_browser(headless: bool = False):
 
 
 NEXT_BUTTON_SELECTORS = [
+    'div[role="dialog"] button:has-text("继续")',
+    'div[role="dialog"] div[role="button"]:has-text("继续")',
+    'div[role="dialog"] [aria-label="继续"]',
     'div[role="dialog"] [aria-label="下一步"]',
     'div[role="dialog"] button:has-text("下一步")',
     'div[role="dialog"] div[role="button"]:has-text("下一步")',
@@ -466,6 +469,8 @@ NEXT_BUTTON_SELECTORS = [
     'div[role="dialog"] div[role="button"]:has-text("Next")',
     'div[role="button"]:has-text("Next")',
     'button:has-text("Next")',
+    'div[role="button"]:has-text("继续")',
+    'button:has-text("继续")',
     'div[role="button"]:has-text("下一步")',
     'button:has-text("下一步")',
     'div[role="button"]:has-text("次へ")',
@@ -485,8 +490,10 @@ SHARE_BUTTON_SELECTORS = [
 ]
 
 POST_SUCCESS_MARKERS = [
-    "Your post has been shared", "Post shared", "已分享", "帖子已分享",
-    "你的帖子已分享", "投稿をシェアしました",
+    "Your post has been shared", "Post shared",
+    "已分享", "帖子已分享", "你的帖子已分享",
+    "你的帖子已发布", "帖子已发布",
+    "投稿をシェアしました",
 ]
 
 POST_ERROR_MARKERS = [
@@ -529,7 +536,8 @@ def _wait_for_post_result(page: Page, timeout_s: int = 60) -> bool:
                 if page.query_selector(f'text={marker}'):
                     try:
                         ok = page.query_selector(
-                            'div[role="button"]:has-text("OK"), button:has-text("OK")')
+                            'div[role="button"]:has-text("OK"), button:has-text("OK"), '
+                            'button:has-text("确定"), div[role="button"]:has-text("确定")')
                         if ok and ok.is_visible():
                             ok.click()
                     except Exception:
@@ -644,10 +652,14 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
             btn = _wait_for_any(page, NEXT_BUTTON_SELECTORS, timeout_s=40)
             if btn:
                 try:
-                    btn.click()
+                    btn.click(timeout=10000)
                     print(f"  Clicked Next ({step_label})")
-                except Exception as e:
-                    print(f"  Next click failed ({step_label}): {str(e)[:80]}")
+                except Exception:
+                    try:
+                        btn.click(force=True, timeout=5000)
+                        print(f"  Clicked Next ({step_label}) (forced)")
+                    except Exception as e2:
+                        print(f"  Next click failed ({step_label}): {str(e2)[:80]}")
             else:
                 print(f"  Next button not found on {step_label} screen (may be skipped)")
 
