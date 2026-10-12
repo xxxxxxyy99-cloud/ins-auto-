@@ -352,6 +352,21 @@ def _has_session_cookie(context) -> bool:
     return False
 
 
+def _wait_for_any(page: Page, selectors, timeout_s: float = 30):
+    """Return the first visible matching element, or None after timeout."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        for sel in selectors:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    return el
+            except Exception:
+                continue
+        time.sleep(1)
+    return None
+
+
 def _new_browser(headless: bool = False):
     """Create a fresh browser + context with saved session. Caller must close."""
     pw = sync_playwright().start()
@@ -368,13 +383,18 @@ def _new_browser(headless: bool = False):
     if not _goto(page, INSTAGRAM_URL):
         raise Exception(NETWORK_HINT)
     time.sleep(2)
-    if not _wait_body(page):
-        print("  Page did not finish loading, reloading once...")
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=45000)
-        except Exception:
-            pass
-        _wait_body(page, 15)
+    if not _wait_body(page, 20):
+        if page.query_selector("svg[aria-label]"):
+            # app shell present but slow; give the assets more time
+            print("  Page still loading (slow network), waiting longer...")
+            _wait_body(page, 40)
+        else:
+            print("  Page stuck on splash, reloading once...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                pass
+            _wait_body(page, 25)
     try:
         if len((page.inner_text("body") or "").strip()) < 10:
             print("  WARNING: Instagram 页面正文为空，静态资源可能被拦截。若浏览器窗口一直"
@@ -502,7 +522,7 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
 
         # Set up file chooser BEFORE clicking the button
         try:
-            with page.expect_file_chooser(timeout=30000) as fc:
+            with page.expect_file_chooser(timeout=60000) as fc:
                 page.click(new_post_sel)
                 print(f"  Clicked {new_post_sel}, waiting for file chooser...")
 
@@ -533,21 +553,23 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
 
         _human_delay("after_upload", 3, 6)
 
-        # ── Step 2: Click "Next" through edit screens ──
+        # ── Step 2: wait for the editor app, then click "Next" ──
+        # The edit screens come from Instagram's JS app; on a slow proxy
+        # they can take a long time to appear after the upload starts.
+        if not _wait_for_any(page, NEXT_BUTTON_SELECTORS, timeout_s=75):
+            raise Exception(
+                "Instagram 编辑界面未加载（网络过慢）。请确认代理节点速度正常后重试，"
+                "或到你的代理里切换一个更快的节点。")
         for step_label in ["crop", "filter"]:
             _human_delay(f"{step_label}_screen", 1, 2)
-            next_clicked = False
-            for sel in NEXT_BUTTON_SELECTORS:
+            btn = _wait_for_any(page, NEXT_BUTTON_SELECTORS, timeout_s=40)
+            if btn:
                 try:
-                    btn = page.wait_for_selector(sel, timeout=8000)
-                    if btn and btn.is_visible():
-                        btn.click()
-                        next_clicked = True
-                        print(f"  Clicked Next ({step_label})")
-                        break
-                except Exception:
-                    continue
-            if not next_clicked:
+                    btn.click()
+                    print(f"  Clicked Next ({step_label})")
+                except Exception as e:
+                    print(f"  Next click failed ({step_label}): {str(e)[:80]}")
+            else:
                 print(f"  Next button not found on {step_label} screen (may be skipped)")
 
         # ── Step 3: Type caption ──
@@ -562,7 +584,7 @@ def post_photo(image_path: str, caption: str, headless: bool = False) -> bool:
         caption_box = None
         for sel in caption_selectors:
             try:
-                caption_box = page.wait_for_selector(sel, timeout=8000)
+                caption_box = page.wait_for_selector(sel, timeout=15000)
                 if caption_box:
                     print(f"  Found caption input: {sel}")
                     break
