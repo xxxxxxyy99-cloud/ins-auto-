@@ -1,8 +1,8 @@
-"""Scheduled auto-posting core: content generation + publishing pipeline.
+"""Scheduled generation core: one piece of content per run.
 
-Used by worker.py (one-shot run in its own process, so Playwright never
-shares a thread or event loop with Streamlit or Tkinter) and by
-scheduler.py (the long-running schedule watcher).
+Used by worker.py (one-shot run in its own process) and by scheduler.py
+(the long-running schedule watcher). Posting is manual — this module
+only ever produces drafts in the draft box.
 """
 
 import random
@@ -10,13 +10,9 @@ from datetime import datetime, time, timedelta
 
 from .content import (
     generate_prompt, generate_image, generate_caption, generate_hashtags,
-    build_caption, DEFAULT_CATEGORIES, DEFAULT_CAPTION_MODEL,
+    DEFAULT_CATEGORIES, DEFAULT_CAPTION_MODEL,
 )
-from .db import (
-    get_settings, draft_save, draft_mark_posted, add_to_history,
-    analytics_increment,
-)
-from .bot import post_photo, SESSION_FILE
+from .db import get_settings, draft_save, analytics_increment
 from .logger import get_logger
 
 log = get_logger("automation")
@@ -69,7 +65,7 @@ def compute_next_run(settings: dict, now: datetime | None = None) -> datetime | 
 
 
 # ═══════════════════════════════════════════════════════════
-#  Auto post pipeline
+#  Auto generate pipeline
 # ═══════════════════════════════════════════════════════════
 
 def _pick_product(settings: dict) -> tuple[str, str]:
@@ -79,12 +75,13 @@ def _pick_product(settings: dict) -> tuple[str, str]:
     return random.choice(DEFAULT_CATEGORIES[category]), category
 
 
-def run_auto_post(dry_run: bool = False) -> dict:
-    """Generate one piece of content and publish it to Instagram.
+def run_auto_generate(dry_run: bool = False) -> dict:
+    """Generate one piece of content and save it as a draft.
 
     Returns {"ok": bool, "stage": str, ...}. Expected failures (image
-    engine down, not logged in, unclear share result) are returned, not
-    raised, and are recorded in the activity log and error counter.
+    engine down) are returned, not raised, and are recorded in the
+    activity log and the error counter. Posting is manual: the draft
+    box is the hand-off point.
     """
     settings = get_settings()
     product, category = _pick_product(settings)
@@ -94,8 +91,8 @@ def run_auto_post(dry_run: bool = False) -> dict:
     provider = settings.get("image_model") or "pollinations"
     instructions = settings.get("caption_instructions", "")
 
-    log.info("auto_start", product=product,
-             message=f"定时发布开始（{'演示模式' if dry_run else '正式发布'}）")
+    log.info("auto_generate_start", product=product,
+             message="自动生成开始" + ("（测试模式）" if dry_run else ""))
 
     # 1) image
     prompt, product_name = generate_prompt(product=product, niche=niche, category=category)
@@ -108,42 +105,23 @@ def run_auto_post(dry_run: bool = False) -> dict:
     # 2) caption + hashtags
     caption = generate_caption(product_name, style=style, niche=niche,
                                model=model, instructions=instructions)
-    tags = generate_hashtags(product_name, niche=niche, model=model)
-
     try:
-        limit = int(settings.get("publish_hashtag_limit", "15") or 15)
-    except (TypeError, ValueError):
-        limit = 15
-    full_caption = build_caption(caption, tags.split() if tags else None, limit=limit)
-
-    analytics_increment("generated")
-
-    # 3) record as draft, then publish
-    did = draft_save(img_path, caption, tags, product_name, category, topic="")
+        tags = generate_hashtags(product_name, niche=niche, model=model)
+    except Exception:
+        tags = settings.get("hashtags", "")
 
     if dry_run:
-        log.info("auto_dry_run", product=product_name, message="演示模式：已生成草稿，未发布")
+        log.info("auto_generate_dry_run", product=product_name,
+                 message="测试模式：已生成，未存入草稿箱")
         return {"ok": True, "stage": "dry_run", "product": product_name,
-                "image": img_path, "caption": caption, "hashtags": tags, "draft_id": did}
+                "image": img_path, "caption": caption, "hashtags": tags,
+                "draft_id": None}
 
-    if not SESSION_FILE.exists():
-        log.error("auto_not_logged_in", product=product_name,
-                  message="未登录 Instagram，跳过本次自动发布")
-        analytics_increment("errors")
-        return {"ok": False, "stage": "login",
-                "message": "未登录 Instagram，请先在网页面板登录一次"}
-
-    headless = str(settings.get("scheduler_headless", "0")) == "1"
-    ok = post_photo(img_path, full_caption, headless=headless)
-    if ok:
-        draft_mark_posted(did)
-        add_to_history(img_path, full_caption, product_name)
-        analytics_increment("posts")
-        log.info("auto_posted", product=product_name, message="自动发布成功")
-        return {"ok": True, "stage": "posted", "product": product_name, "draft_id": did}
-
-    log.error("auto_post_failed", product=product_name,
-              message="自动发布失败（Instagram 未确认发布成功）")
-    analytics_increment("errors")
-    return {"ok": False, "stage": "post",
-            "message": "发布未确认成功，检查 data/post_unconfirmed.png"}
+    # 3) save into the draft box — the hand-off point for manual posting
+    did = draft_save(img_path, caption, tags, product_name, category, topic="")
+    analytics_increment("generated")
+    log.info("auto_generated", product=product_name,
+             message="自动生成完成，已存入草稿箱（等你手动发布）")
+    return {"ok": True, "stage": "done", "product": product_name,
+            "image": img_path, "caption": caption, "hashtags": tags,
+            "draft_id": did}

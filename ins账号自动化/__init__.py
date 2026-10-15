@@ -28,5 +28,4 @@ from .content import (
     TOPICS, TOPIC_KEYS,
     IMAGE_DIR, DEFAULT_CAPTION_MODEL,
 )
-from .bot import login, post_photo, SESSION_FILE
 from .logger import get_logger

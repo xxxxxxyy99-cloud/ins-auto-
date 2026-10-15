@@ -1,8 +1,8 @@
-"""InsAuto — Instagram AI Content Operations Assistant."""
+"""InsAuto — AI content generator for Instagram (manual posting)."""
 
 import streamlit as st
-import time
 import sys
+import os
 import random
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +28,6 @@ from ins账号自动化 import (
     build_caption,
     ASPECT_RATIOS, DEFAULT_CATEGORIES, CAPTION_STYLES, TOPICS, TOPIC_KEYS,
     IMAGE_DIR, DEFAULT_CAPTION_MODEL,
-    login as bot_login, post_photo, SESSION_FILE,
 )
 
 from ins账号自动化.config import GEMINI_API_KEY, OPENROUTER_API_KEY
@@ -80,25 +79,17 @@ st.markdown("""
 # ── Session State Init ─────────────────────────────────────────
 
 DEFAULTS = {
-    "authenticated": False,
     "_page": "dashboard",
     "_studio_prompt": "",
     "_studio_product": "",
     "_studio_image": "",
     "_studio_caption": "",
     "_studio_hashtags": "",
-    "_login_start_time": 0.0,
-    "_login_pending": False,
 }
 
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-# Restore an existing Instagram session into the UI state early, so the
-# sidebar renders the correct state on the very first load.
-if not st.session_state.authenticated and SESSION_FILE.exists():
-    st.session_state.authenticated = True
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -123,17 +114,6 @@ def _badge(status: str) -> str:
     return f'<span class="badge {m.get(status, "badge-warning")}">{status}</span>'
 
 
-def _ensure_login():
-    """Check if Instagram session file exists and is valid."""
-    if st.session_state.authenticated:
-        return True
-    if SESSION_FILE.exists():
-        # Session file exists → user has logged in before
-        st.session_state.authenticated = True
-        return True
-    return False
-
-
 def _clear_studio():
     for k in ("_studio_prompt", "_studio_product", "_studio_image",
               "_studio_caption", "_studio_hashtags"):
@@ -148,8 +128,8 @@ def _theme_of(topic: str) -> str:
     return TOPICS.get(topic, "") if topic and topic != "无" else ""
 
 
-def _publish_caption(cap: str, tags: str) -> str:
-    """Final caption text: deduped, limited hashtag block appended."""
+def _final_caption(cap: str, tags: str) -> str:
+    """Copy-ready caption: text plus the limited, deduped hashtag block."""
     try:
         limit = int(get_settings().get("publish_hashtag_limit", "15") or 15)
     except (TypeError, ValueError):
@@ -157,11 +137,35 @@ def _publish_caption(cap: str, tags: str) -> str:
     return build_caption(cap, tags.split() if tags else None, limit=limit)
 
 
-def _post_failed(product: str, why: str = "Instagram 页面未完成发布"):
-    """Uniform failure bookkeeping: activity log + error counter + notice."""
-    log_event("post_failed", product=product, message=why, severity="error")
-    analytics_increment("errors")
-    st.error(f"❌ 发布失败：{why}。若为登录过期，请点侧边栏「🔌」断开后重新登录，再试一次。")
+def _open_folder(img_path: str):
+    """Open the folder holding the image in the system file manager."""
+    try:
+        folder = Path(img_path).resolve().parent
+        if hasattr(os, "startfile"):
+            os.startfile(str(folder))
+        else:
+            st.info(f"图片目录: {folder}")
+    except Exception as e:
+        st.warning(f"打不开文件夹: {e}")
+
+
+def _copy_panel(cap: str, tags: str, img_path: str, key: str):
+    """Copy-ready caption block + open-folder shortcut for manual posting."""
+    st.code(_final_caption(cap, tags), language=None)
+    col_f, col_p = st.columns([1, 2])
+    with col_f:
+        if st.button("📂 打开图片文件夹", key=f"open_{key}", use_container_width=True):
+            _open_folder(img_path)
+    with col_p:
+        st.caption(f"📁 {Path(img_path).name if img_path else '（无图片）'}")
+
+
+def _mark_posted(draft_id: int, img_path: str, cap: str, tags: str, product: str):
+    """Bookkeeping for a post the user published manually."""
+    draft_mark_posted(draft_id)
+    add_to_history(img_path, _final_caption(cap, tags), product)
+    analytics_increment("posts")
+    log_event("posted_manually", product=product, message="已发布（手动记录）")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -172,54 +176,7 @@ with st.sidebar:
     st.markdown("## 🎨 InsAuto")
     st.caption("Instagram AI 内容运营助手")
 
-    # ── Login ──
-    if not st.session_state.authenticated:
-        st.markdown("---")
-        st.markdown("### 🔐 Instagram")
-        c1, c2 = st.columns(2)
-
-        with c1:
-            if st.button("🔗 登录", use_container_width=True, type="primary"):
-                st.session_state._login_start_time = time.time()
-                st.session_state._login_pending = True
-                st.rerun()
-
-        # Two-step login: show info first, then block
-        if st.session_state.get("_login_pending"):
-            st.info("浏览器已打开，请在浏览器中登录 Instagram。登录成功后自动返回。")
-            try:
-                bot_login(interactive=True)
-                st.session_state.authenticated = True
-                log_event("login_success", message="Instagram 登录成功")
-            except Exception as e:
-                log_event("login_failed", message=str(e)[:200], severity="error")
-                st.error(f"登录失败: {e}")
-            st.session_state._login_pending = False
-            st.session_state._login_start_time = 0
-            st.rerun()
-
-        with c2:
-            if st.button("🎮 离线", use_container_width=True):
-                st.session_state.authenticated = True
-                st.rerun()
-
-        # Detect login completion from browser login (polling fallback)
-        if st.session_state._login_start_time > 0 and SESSION_FILE.exists():
-            mtime = SESSION_FILE.stat().st_mtime
-            if mtime >= st.session_state._login_start_time:
-                st.session_state.authenticated = True
-                st.session_state._login_start_time = 0
-                st.rerun()
-
-    else:
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
-            st.success("✅ 已连接 Instagram")
-        with col_b:
-            if st.button("🔌", help="断开连接"):
-                SESSION_FILE.unlink(missing_ok=True)
-                st.session_state.authenticated = False
-                st.rerun()
+    st.caption("生成内容 → 复制文案 → 手动发布到 Instagram")
 
     # ── Navigation ──
     st.markdown("---")
@@ -248,7 +205,7 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    st.caption(f"v2.2 · {datetime.now().strftime('%Y-%m-%d')}")
+    st.caption(f"v2.3 · {datetime.now().strftime('%Y-%m-%d')}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -288,9 +245,9 @@ if st.session_state._page == "dashboard":
         _nxt = compute_next_run(_sched)
         _last = _sched.get("schedule_last_result", "") or "无"
         if _nxt:
-            st.caption(f"⏰ 定时发布已启用 · 下次: {_nxt:%m-%d %H:%M} · 上次结果: {_last}")
+            st.caption(f"⏰ 定时生成已启用 · 下次: {_nxt:%m-%d %H:%M} · 上次结果: {_last}")
         else:
-            st.caption("⏰ 定时发布已启用（等待定时服务进程启动）")
+            st.caption("⏰ 定时生成已启用（等待定时服务进程启动）")
 
     # ── Quick Actions ──
     st.markdown("---")
@@ -487,7 +444,7 @@ elif st.session_state._page == "studio":
                     st.text_area("Caption", st.session_state._studio_caption, height=120, key="edit_caption")
                     st.text_input("Hashtags", st.session_state._studio_hashtags, key="edit_hashtags")
 
-                col_save, col_review, col_post = st.columns(3)
+                col_save, col_review = st.columns(2)
                 with col_save:
                     if st.button("💾 保存草稿", use_container_width=True):
                         final_cap = st.session_state.get("edit_caption", st.session_state._studio_caption)
@@ -525,29 +482,13 @@ elif st.session_state._page == "studio":
                         st.success("已提交审核!")
                         st.rerun()
 
-                with col_post:
-                    if st.button("🚀 发布到 Instagram", use_container_width=True, type="primary"):
-                        if _ensure_login():
-                            final_cap = st.session_state.get("edit_caption", st.session_state._studio_caption)
-                            final_tags = st.session_state.get("edit_hashtags", st.session_state._studio_hashtags)
-                            full_caption = _publish_caption(final_cap, final_tags)
-                            with st.spinner("发布中..."):
-                                ok = post_photo(st.session_state._studio_image, full_caption)
-                            if ok:
-                                add_to_history(st.session_state._studio_image, full_caption,
-                                               st.session_state._studio_product)
-                                analytics_increment("posts")
-                                did = draft_save(st.session_state._studio_image, final_cap, final_tags,
-                                                 st.session_state._studio_product, category,
-                                                 topic_sel if topic_sel != "无" else "")
-                                draft_mark_posted(did)
-                                log_event("post_success", product=st.session_state._studio_product,
-                                          message="手动发布成功")
-                                st.success("✅ 发布成功！")
-                            else:
-                                _post_failed(st.session_state._studio_product)
-                        else:
-                            st.warning("⚠️ 请先在侧边栏登录 Instagram。")
+                with st.expander("📤 取用（复制文案 · 打开图片文件夹）", expanded=False):
+                    _copy_panel(
+                        st.session_state.get("edit_caption", st.session_state._studio_caption),
+                        st.session_state.get("edit_hashtags", st.session_state._studio_hashtags),
+                        st.session_state._studio_image,
+                        key="studio",
+                    )
             else:
                 st.info("点击「生成内容」创建你的第一条内容。")
 
@@ -649,7 +590,7 @@ elif st.session_state._page == "studio":
                             key="edit_upload_hashtags"
                         )
 
-                    col_s, col_r, col_p = st.columns(3)
+                    col_s, col_r = st.columns(2)
                     with col_s:
                         if st.button("💾 保存草稿", key="upload_save", use_container_width=True):
                             final_cap = st.session_state.get("edit_upload_caption", st.session_state._studio_caption)
@@ -682,29 +623,13 @@ elif st.session_state._page == "studio":
                                       message="从图片上传提交审核")
                             st.success("已提交审核!")
 
-                    with col_p:
-                        if st.button("🚀 发布", key="upload_post", use_container_width=True, type="primary"):
-                            if _ensure_login():
-                                final_cap = st.session_state.get("edit_upload_caption", st.session_state._studio_caption)
-                                final_tags = st.session_state.get("edit_upload_hashtags", st.session_state._studio_hashtags)
-                                full_cap = _publish_caption(final_cap, final_tags)
-                                with st.spinner("发布中..."):
-                                    ok = post_photo(st.session_state._studio_image, full_cap)
-                                if ok:
-                                    add_to_history(st.session_state._studio_image, full_cap,
-                                                   st.session_state._studio_product)
-                                    analytics_increment("posts")
-                                    did = draft_save(st.session_state._studio_image, final_cap, final_tags,
-                                                     st.session_state._studio_product, category="upload",
-                                                     topic=upload_topic if upload_topic != "无" else "")
-                                    draft_mark_posted(did)
-                                    log_event("post_success", product=st.session_state._studio_product,
-                                              message="从图片上传发布")
-                                    st.success("✅ 发布成功！")
-                                else:
-                                    _post_failed(st.session_state._studio_product)
-                            else:
-                                st.warning("⚠️ 请先在侧边栏登录 Instagram。")
+                    with st.expander("📤 取用（复制文案 · 打开图片文件夹）", expanded=False):
+                        _copy_panel(
+                            st.session_state.get("edit_upload_caption", st.session_state._studio_caption),
+                            st.session_state.get("edit_upload_hashtags", st.session_state._studio_hashtags),
+                            st.session_state._studio_image,
+                            key="upload",
+                        )
             else:
                 st.info("👈 上传一张图片开始")
 
@@ -807,31 +732,24 @@ elif st.session_state._page == "drafts":
                                 st.success("已提交审核")
                                 st.rerun()
                     with col_c:
+                        if st.button("📋 取用", key=f"copy_{d['id']}",
+                                     help="复制完整文案（含标签）/ 打开图片文件夹"):
+                            st.session_state[f"copyshow_{d['id']}"] = not st.session_state.get(f"copyshow_{d['id']}", False)
+                    with col_d:
+                        if d["status"] != "posted":
+                            if st.button("✅ 已发布", key=f"mark_{d['id']}",
+                                         help="在 Instagram 发完后点这里记入统计"):
+                                draft_update(d["id"], caption=edit_cap, hashtags=edit_tags)
+                                _mark_posted(d["id"], d["image_path"], edit_cap, edit_tags, d["product"])
+                                st.success("✅ 已记入发布记录")
+                                st.rerun()
+                    with col_e:
                         if st.button("🗑️ 删除", key=f"del_{d['id']}"):
                             draft_delete(d["id"])
                             st.rerun()
-                    with col_d:
-                        if st.button("📋 复制", key=f"copy_{d['id']}"):
-                            st.code(edit_cap, language=None)
-                    with col_e:
-                        if d["status"] != "posted":
-                            if st.button("🚀 发布", key=f"post_{d['id']}", type="primary"):
-                                if _ensure_login():
-                                    full_cap = _publish_caption(edit_cap, edit_tags)
-                                    with st.spinner("发布中..."):
-                                        ok = post_photo(d["image_path"], full_cap)
-                                    if ok:
-                                        draft_update(d["id"], caption=edit_cap, hashtags=edit_tags)
-                                        draft_mark_posted(d["id"])
-                                        add_to_history(d["image_path"], full_cap, d["product"])
-                                        analytics_increment("posts")
-                                        log_event("post_success", product=d["product"], message="从草稿箱发布")
-                                        st.success("✅ 发布成功！")
-                                        st.rerun()
-                                    else:
-                                        _post_failed(d["product"])
-                                else:
-                                    st.warning("⚠️ 请先在侧边栏登录 Instagram。")
+
+                    if st.session_state.get(f"copyshow_{d['id']}"):
+                        _copy_panel(edit_cap, edit_tags, d["image_path"], key=f"draft_{d['id']}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -888,17 +806,17 @@ elif st.session_state._page == "assets":
                         st.rerun()
                 with col_btn3:
                     pub_key = f"pub_{a['id']}"
-                    if st.button("🚀", key=f"pubbtn_{a['id']}", help="快速发布"):
+                    if st.button("📤", key=f"pubbtn_{a['id']}", help="取用（复制文案 / 打开图片）"):
                         st.session_state[pub_key] = not st.session_state.get(pub_key, False)
                 with col_btn4:
                     if st.button("🗑️", key=f"adel_{a['id']}", help="删除"):
                         asset_delete(a["image_path"])
                         st.rerun()
 
-                # Quick-publish expander (shown when 🚀 is toggled)
+                # 取用面板 (shown when 📤 is toggled)
                 pub_key = f"pub_{a['id']}"
                 if st.session_state.get(pub_key, False):
-                    with st.expander("🚀 快速发布", expanded=True):
+                    with st.expander("📤 取用（复制文案 · 打开图片）", expanded=True):
                         col_cap1, col_cap2 = st.columns([3, 1])
                         with col_cap1:
                             qp_cap = st.text_area(
@@ -929,38 +847,16 @@ elif st.session_state._page == "assets":
                             placeholder="#tag1 #tag2",
                         )
 
-                        col_pub1, col_pub2 = st.columns(2)
-                        with col_pub1:
-                            if st.button("💾 保存草稿", key=f"qp_save_{a['id']}", use_container_width=True):
-                                draft_save(
-                                    image_path=a["image_path"],
-                                    caption=qp_cap,
-                                    hashtags=qp_tags,
-                                    product=a.get("product", ""),
-                                )
-                                st.success("已保存到草稿箱")
-                        with col_pub2:
-                            if st.button("🚀 立即发布", key=f"qp_go_{a['id']}",
-                                        use_container_width=True, type="primary"):
-                                if _ensure_login():
-                                    full_cap = _publish_caption(qp_cap, qp_tags)
-                                    with st.spinner("发布中..."):
-                                        ok = post_photo(a["image_path"], full_cap)
-                                    if ok:
-                                        add_to_history(a["image_path"], full_cap, a.get("product", ""))
-                                        analytics_increment("posts")
-                                        did = draft_save(a["image_path"], qp_cap, qp_tags,
-                                                         a.get("product", ""), topic="")
-                                        draft_mark_posted(did)
-                                        log_event("post_success", product=a.get("product", ""),
-                                                  message="从素材库直接发布")
-                                        st.session_state[pub_key] = False
-                                        st.success("✅ 发布成功！")
-                                        st.rerun()
-                                    else:
-                                        _post_failed(a.get("product", ""))
-                                else:
-                                    st.warning("⚠️ 请先在侧边栏登录 Instagram。")
+                        if st.button("💾 保存到草稿箱", key=f"qp_save_{a['id']}", use_container_width=True):
+                            draft_save(
+                                image_path=a["image_path"],
+                                caption=qp_cap,
+                                hashtags=qp_tags,
+                                product=a.get("product", ""),
+                            )
+                            st.success("已保存到草稿箱")
+
+                        _copy_panel(qp_cap, qp_tags, a["image_path"], key=f"asset_{a['id']}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1030,7 +926,7 @@ elif st.session_state._page == "content":
                         # Footer: date + actions
                         st.caption(f"📅 {_fmt_ts(r['created_at'])}")
 
-                        col_a1, col_a2, col_a3 = st.columns(3)
+                        col_a1, col_a2, col_a3, col_a4 = st.columns(4)
                         with col_a1:
                             if st.button("✏️", key=f"cm_edit_{r['id']}", help="在工作室打开"):
                                 st.session_state._studio_image = r["image_path"]
@@ -1040,28 +936,23 @@ elif st.session_state._page == "content":
                                 st.session_state._page = "studio"
                                 st.rerun()
                         with col_a2:
-                            if r["status"] != "posted":
-                                if st.button("🚀", key=f"cm_post_{r['id']}", help="发布到 Instagram"):
-                                    if _ensure_login():
-                                        cap = _publish_caption(r["caption"], r.get("hashtags", ""))
-                                        with st.spinner("发布中..."):
-                                            ok = post_photo(r["image_path"], cap)
-                                        if ok:
-                                            draft_mark_posted(r["id"])
-                                            add_to_history(r["image_path"], cap, r.get("product", ""))
-                                            analytics_increment("posts")
-                                            log_event("post_success", product=r.get("product", ""),
-                                                      message="从内容库发布")
-                                            st.success("✅ 已发布")
-                                            st.rerun()
-                                        else:
-                                            _post_failed(r.get("product", ""))
-                                    else:
-                                        st.warning("⚠️ 请先登录 Instagram")
+                            if st.button("📋", key=f"cm_copy_{r['id']}", help="复制完整文案（含标签）"):
+                                st.session_state[f"cmshow_{r['id']}"] = not st.session_state.get(f"cmshow_{r['id']}", False)
                         with col_a3:
+                            if r["status"] != "posted":
+                                if st.button("✅", key=f"cm_mark_{r['id']}", help="在 Instagram 发完后点这里记入统计"):
+                                    _mark_posted(r["id"], r["image_path"], r["caption"],
+                                                 r.get("hashtags", ""), r.get("product", ""))
+                                    st.success("✅ 已记入发布记录")
+                                    st.rerun()
+                        with col_a4:
                             if st.button("🗑️", key=f"cm_del_{r['id']}", help="删除"):
                                 draft_delete(r["id"])
                                 st.rerun()
+
+                        if st.session_state.get(f"cmshow_{r['id']}"):
+                            _copy_panel(r["caption"], r.get("hashtags", ""),
+                                        r["image_path"], key=f"cm_{r['id']}")
 
     # ── Tab 2: Published History ──
     with tab_hist:
@@ -1171,7 +1062,7 @@ elif st.session_state._page == "review":
                     st.markdown("---")
 
                     # Approve → move to draft
-                    if st.button("✅ 批准发布", key=f"rv_appr_{item['id']}", use_container_width=True, type="primary"):
+                    if st.button("✅ 通过审核", key=f"rv_appr_{item['id']}", use_container_width=True, type="primary"):
                         draft_update(item["id"], caption=edited_caption, hashtags=edited_tags)
                         draft_approve(item["id"])
                         log_event("review_approved", product=item.get("product", ""),
@@ -1303,7 +1194,7 @@ elif st.session_state._page == "settings":
          "⚠️ Gemini Key 未配置（图片质量更好，免费 500 张/天，去 aistudio.google.com 申请后填入 ins账号自动化/data/.env）")
     )
 
-    tab_s1, tab_s2, tab_s3, tab_s4 = st.tabs(["🎯 品牌 & 内容", "🤖 AI 模型", "🏷️ 默认标签", "⏰ 定时发布"])
+    tab_s1, tab_s2, tab_s3, tab_s4 = st.tabs(["🎯 品牌 & 内容", "🤖 AI 模型", "🏷️ 默认标签", "⏰ 定时生成"])
 
     with tab_s1:
         st.markdown("#### 🎯 品牌信息")
@@ -1341,7 +1232,7 @@ elif st.session_state._page == "settings":
     with tab_s3:
         st.markdown("#### 🏷️ 默认标签")
         new_tags = st.text_area("Hashtags", s.get("hashtags", ""), height=100,
-                                 help="发布时自动追加的标签，空格分隔")
+                                 help="标签生成失败时的兜底标签，空格分隔")
         st.caption("💡 在「内容工作室 → 标签工具」中可以为每条内容生成专属标签。")
 
         if st.button("💾 保存标签", key="save_tags"):
@@ -1349,11 +1240,11 @@ elif st.session_state._page == "settings":
             st.success("标签已保存")
 
     with tab_s4:
-        st.markdown("#### ⏰ 定时自动发布")
+        st.markdown("#### ⏰ 定时自动生成草稿")
         sched_on = st.checkbox(
-            "启用定时自动发布",
+            "启用定时自动生成",
             value=str(s.get("schedule_enabled", "0")) == "1",
-            help="由定时服务进程执行；用桌面面板的「启动定时服务」或双击 启动定时发布.bat 启动")
+            help="由定时服务进程执行；到点自动生成内容并存入草稿箱，发布由你手动完成。用桌面面板的「启动定时服务」或双击 启动定时生成.bat 启动")
         col_sc1, col_sc2, col_sc3 = st.columns(3)
         with col_sc1:
             mode_opts = ["interval", "daily"]
@@ -1363,12 +1254,12 @@ elif st.session_state._page == "settings":
                 index=mode_opts.index(saved_mode) if saved_mode in mode_opts else 0,
                 format_func=lambda m: "间隔N天" if m == "interval" else "每天")
         with col_sc2:
-            sched_time = st.text_input("发布时间 (HH:MM)", s.get("scheduled_time", "10:00"))
+            sched_time = st.text_input("生成时间 (HH:MM)", s.get("scheduled_time", "10:00"))
         with col_sc3:
             sched_days = st.number_input(
                 "间隔天数", min_value=1, max_value=30,
                 value=int(s.get("interval_days", "2") or 2))
-        col_sc4, col_sc5, col_sc6 = st.columns(3)
+        col_sc4, col_sc5 = st.columns(2)
         with col_sc4:
             cat_opts = ["(随机)"] + list(DEFAULT_CATEGORIES.keys())
             saved_cat = s.get("schedule_category", "") or "(随机)"
@@ -1376,13 +1267,10 @@ elif st.session_state._page == "settings":
                 "产品品类", cat_opts,
                 index=cat_opts.index(saved_cat) if saved_cat in cat_opts else 0)
         with col_sc5:
-            sched_headless = st.checkbox(
-                "后台运行浏览器", value=str(s.get("scheduler_headless", "0")) == "1",
-                help="勾选后自动发布时不弹出浏览器窗口")
-        with col_sc6:
             new_limit = st.number_input(
-                "发布标签数量上限", min_value=1, max_value=30,
-                value=int(s.get("publish_hashtag_limit", "15") or 15))
+                "标签数量上限", min_value=1, max_value=30,
+                value=int(s.get("publish_hashtag_limit", "15") or 15),
+                help="复制/取用文案时，标签最多保留多少个")
 
         if st.button("💾 保存定时设置", key="save_schedule"):
             save_settings(
@@ -1391,7 +1279,6 @@ elif st.session_state._page == "settings":
                 scheduled_time=sched_time.strip() or "10:00",
                 interval_days=str(int(sched_days)),
                 schedule_category="" if sched_cat == "(随机)" else sched_cat,
-                scheduler_headless="1" if sched_headless else "0",
                 publish_hashtag_limit=str(int(new_limit)),
             )
             st.success("定时设置已保存。定时服务运行中会自动按新设置执行。")
@@ -1399,10 +1286,10 @@ elif st.session_state._page == "settings":
         _nxt_ui = compute_next_run(get_settings())
         _last_ui = s.get("schedule_last_result", "") or "无"
         if _nxt_ui:
-            st.caption(f"📅 下次发布: {_nxt_ui:%m-%d %H:%M} ｜ 上次结果: {_last_ui}")
+            st.caption(f"📅 下次生成: {_nxt_ui:%m-%d %H:%M} ｜ 上次结果: {_last_ui}")
         else:
-            st.caption(f"⏸ 定时发布未启用 ｜ 上次结果: {_last_ui}")
-        st.caption("💡 启动方式: 桌面面板「▶ 启动定时服务」，或双击 启动定时发布.bat（保持窗口开启）。")
+            st.caption(f"⏸ 定时生成未启用 ｜ 上次结果: {_last_ui}")
+        st.caption("💡 启动方式: 桌面面板「▶ 启动定时服务」，或双击 启动定时生成.bat（保持窗口开启）。")
 
     st.markdown("---")
     st.markdown("#### ⚠️ 危险操作")
@@ -1411,7 +1298,3 @@ elif st.session_state._page == "settings":
                   "llm_model", "image_model", "hashtags"):
             save_settings(**{k: ""})
         st.warning("设置已重置，刷新后生效。")
-
-
-# (session auto-restore now happens at the top of the script,
-#  before the sidebar renders)

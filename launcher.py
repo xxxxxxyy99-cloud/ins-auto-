@@ -1,10 +1,11 @@
 """InsAuto desktop control panel (Tkinter).
 
-Supervises the web dashboard (Streamlit) and the schedule service
-(scheduler.py), can trigger a one-off auto post (worker.py), edits the
-posting schedule, and shows status: Instagram session, API keys, next
-and last scheduled run. All settings live in the SQLite settings table,
-so this panel and the web dashboard always agree.
+Supervises the web dashboard (Streamlit) and the generation service
+(scheduler.py), can trigger a one-off content generation (worker.py),
+edits the generation schedule, and shows status: draft count, API keys,
+next and last scheduled run. Posting is manual. All settings live in
+the SQLite settings table, so this panel and the web dashboard always
+agree.
 
 Usage:
     python launcher.py            # open the panel
@@ -17,7 +18,6 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -27,7 +27,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from ins账号自动化 import get_settings, save_settings, SESSION_FILE
+from ins账号自动化 import get_settings, save_settings, draft_count
 from ins账号自动化.automation import compute_next_run
 
 try:
@@ -37,7 +37,7 @@ except Exception:
 
 ASSETS = ROOT / "assets"
 SCHED_LOCK = ROOT / "ins账号自动化" / "data" / "scheduler.lock"
-APP_VERSION = "v2.2"
+APP_VERSION = "v2.3"
 FLAGS = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 
 BG, BG2, FG, MUTED = "#0d1117", "#161b22", "#e6edf3", "#8b949e"
@@ -97,8 +97,8 @@ class LauncherApp(tk.Tk):
 
         box = ttk.Frame(self)
         box.pack(fill="x", **pad)
-        self.lbl_ig = ttk.Label(box, text="")
-        self.lbl_ig.pack(anchor="w")
+        self.lbl_drafts = ttk.Label(box, text="")
+        self.lbl_drafts.pack(anchor="w")
         self.lbl_keys = ttk.Label(box, text="")
         self.lbl_keys.pack(anchor="w")
         self.lbl_sched = ttk.Label(box, text="", style="Muted.TLabel")
@@ -112,9 +112,8 @@ class LauncherApp(tk.Tk):
         self.var_time = tk.StringVar()
         self.var_days = tk.IntVar()
         self.var_cat = tk.StringVar()
-        self.var_headless = tk.BooleanVar()
 
-        sf = ttk.Labelframe(self, text=" 定时发布 ", padding=10)
+        sf = ttk.Labelframe(self, text=" 定时生成 ", padding=10)
         sf.pack(fill="x", **pad)
         r1 = ttk.Frame(sf)
         r1.pack(fill="x", pady=3)
@@ -131,8 +130,8 @@ class LauncherApp(tk.Tk):
         ttk.Label(r2, text="品类").pack(side="left")
         ttk.Combobox(r2, textvariable=self.var_cat, values=CATEGORIES,
                      width=10, state="readonly").pack(side="left", padx=(4, 14))
-        ttk.Checkbutton(r2, text="后台运行浏览器（无窗口）",
-                        variable=self.var_headless).pack(side="left")
+        ttk.Label(r2, text="到点自动生成内容并存入草稿箱，发布由你手动完成",
+                  style="Muted.TLabel").pack(side="left")
         ttk.Button(r2, text="💾 保存设置", command=self._save_schedule).pack(side="right")
 
         # action buttons
@@ -142,7 +141,7 @@ class LauncherApp(tk.Tk):
         self._btn(bf, "⏹ 停止网页", lambda: self._stop("网页")).pack(side="left", padx=(0, 6))
         self._btn(bf, "▶ 启动定时服务", self._start_scheduler).pack(side="left", padx=(0, 6))
         self._btn(bf, "⏹ 停止定时", lambda: self._stop("定时")).pack(side="left", padx=(0, 6))
-        self._btn(bf, "🚀 立即发一条", self._run_once).pack(side="left", padx=(0, 6))
+        self._btn(bf, "⚡ 立即生成一条", self._run_once).pack(side="left", padx=(0, 6))
         self._btn(bf, "🌐 打开面板", self._open_dashboard).pack(side="left")
 
         # log pane
@@ -218,7 +217,7 @@ class LauncherApp(tk.Tk):
         self._spawn("定时", [str(ROOT / "scheduler.py")])
 
     def _run_once(self):
-        self._spawn("发布", [str(ROOT / "worker.py")])
+        self._spawn("生成", [str(ROOT / "worker.py")])
 
     def _open_dashboard(self):
         webbrowser.open("http://localhost:8501")
@@ -237,7 +236,6 @@ class LauncherApp(tk.Tk):
             self.var_days.set(2)
         cat = s.get("schedule_category", "") or "(随机)"
         self.var_cat.set(cat if cat in CATEGORIES else "(随机)")
-        self.var_headless.set(str(s.get("scheduler_headless", "0")) == "1")
 
     def _save_schedule(self):
         try:
@@ -250,9 +248,8 @@ class LauncherApp(tk.Tk):
             scheduled_time=(self.var_time.get() or "10:00").strip(),
             interval_days=str(days),
             schedule_category="" if self.var_cat.get() == "(随机)" else self.var_cat.get(),
-            scheduler_headless="1" if self.var_headless.get() else "0",
         )
-        self._append("[设置] 定时设置已保存")
+        self._append("[设置] 定时生成设置已保存")
         self._refresh()
 
     # ── status refresh ──────────────────────────────────
@@ -261,11 +258,13 @@ class LauncherApp(tk.Tk):
         try:
             s = get_settings()
 
-            if SESSION_FILE.exists():
-                mt = datetime.fromtimestamp(SESSION_FILE.stat().st_mtime).strftime("%m-%d %H:%M")
-                self.lbl_ig.config(text=f"✅ Instagram 已登录（会话更新于 {mt}）", foreground=GREEN)
-            else:
-                self.lbl_ig.config(text="❌ Instagram 未登录（打开网页面板登录一次）", foreground=RED)
+            try:
+                n = draft_count()
+                self.lbl_drafts.config(
+                    text=f"📋 草稿箱: {n} 条内容（生成后到网页面板复制文案 + 打开图片）",
+                    foreground=FG)
+            except Exception:
+                self.lbl_drafts.config(text="")
 
             or_ok = bool(OPENROUTER_API_KEY) and not OPENROUTER_API_KEY.startswith("your-")
             gm_ok = bool(GEMINI_API_KEY)
@@ -281,27 +280,27 @@ class LauncherApp(tk.Tk):
                 pass
             self.lbl_sched.config(
                 text="🟢 定时服务运行中" if running
-                else "⚪ 定时服务未运行（点「启动定时服务」或运行 启动定时发布.bat）",
+                else "⚪ 定时服务未运行（点「启动定时服务」或运行 启动定时生成.bat）",
                 foreground=GREEN if running else MUTED)
 
             nxt = compute_next_run(s)
             last = s.get("schedule_last_result", "") or "无"
             if nxt:
                 self.lbl_next.config(
-                    text=f"📅 下次发布: {nxt.strftime('%m-%d %H:%M')}   ·   上次结果: {last}",
+                    text=f"📅 下次生成: {nxt.strftime('%m-%d %H:%M')}   ·   上次结果: {last}",
                     foreground=FG)
             else:
-                self.lbl_next.config(text=f"⏸ 定时发布未启用   ·   上次结果: {last}",
+                self.lbl_next.config(text=f"⏸ 定时生成未启用   ·   上次结果: {last}",
                                      foreground=MUTED)
         except Exception:
             pass
         self.after(2000, self._refresh)
 
     def _on_close(self):
-        running = [n for n in ("网页", "定时", "发布") if self._alive(n)]
+        running = [n for n in ("网页", "定时", "生成") if self._alive(n)]
         if running:
             ans = messagebox.askyesnocancel(
-                "退出", "是否同时停止由本面板启动的进程？\n（网页 / 定时 / 发布）\n\n"
+                "退出", "是否同时停止由本面板启动的进程？\n（网页 / 定时 / 生成）\n\n"
                        "是 = 停止并退出\n否 = 让它们继续后台运行并退出")
             if ans is None:
                 return

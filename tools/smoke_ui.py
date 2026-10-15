@@ -1,8 +1,8 @@
 """Headless UI smoke test for the Streamlit dashboard.
 
 Boots app.py on a free port, drives a headless Chromium through every
-page (offline mode, no posting, no generation), and checks the rendered
-text for Python exception markers.
+page (no generation, no posting), and checks the rendered text for
+Python exception markers.
 
 Usage:
     python tools/smoke_ui.py
@@ -64,14 +64,6 @@ def main() -> int:
             page.goto(f"http://127.0.0.1:{port}", wait_until="domcontentloaded")
             page.wait_for_selector("text=InsAuto", timeout=60000)
             time.sleep(3)
-
-            # offline mode (optional — with a saved session the panel
-            # may already render in the connected state)
-            try:
-                page.get_by_role("button", name="离线").first.click(timeout=5000)
-                time.sleep(2.5)
-            except Exception:
-                print("  (already authenticated — skipping the offline toggle)")
 
             sidebar = page.locator('[data-testid="stSidebar"]')
             for name in PAGES:

@@ -1,5 +1,5 @@
 streamlit>=1.28
-playwright>=1.40
+playwright>=1.40  # only needed for tools/smoke_ui.py (headless page check)
 requests>=2.31
 python-dotenv>=1.0
 Pillow>=10.0

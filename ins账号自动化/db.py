@@ -154,7 +154,6 @@ DEFAULT_SETTINGS = {
     "schedule_mode": "interval",
     "scheduled_time": "10:00",
     "schedule_category": "",
-    "scheduler_headless": "0",
     "schedule_last_run": "",
     "schedule_next_run": "",
     "schedule_last_result": "",

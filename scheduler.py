@@ -1,14 +1,14 @@
-"""Schedule watcher for automatic Instagram posting.
+"""Schedule watcher for automatic content generation.
 
 Loops with a short check interval; when the schedule is due it spawns
-worker.py as a child process (Playwright isolation), waits for it,
-records the result, and computes the next run time. Runs standalone
-(启动定时发布.bat) or is supervised by launcher.py.
+worker.py as a child process (keeps long image/LLM calls out of the UI
+processes), waits for it, records the result, and computes the next run
+time. Runs standalone (启动定时生成.bat) or is supervised by launcher.py.
 
 Usage:
     python scheduler.py                # watch forever
     python scheduler.py --once         # check once, run if due, exit
-    python scheduler.py --dry-run      # pass --dry-run to workers (no posting)
+    python scheduler.py --dry-run      # workers generate without saving
     python scheduler.py --interval 15  # check every N seconds (default 30)
 """
 
@@ -55,14 +55,14 @@ def _check_and_run(dry_run: bool, once: bool) -> int:
     if nxt is None:
         settings_set(schedule_next_run="")
         if once:
-            _say("定时发布未启用（schedule_enabled=0），无事可做")
+            _say("定时生成未启用（schedule_enabled=0），无事可做")
         return 0
 
     now = datetime.now()
     if now < nxt:
         settings_set(schedule_next_run=nxt.isoformat(timespec="minutes"))
         if once:
-            _say(f"未到发布时间，下次: {nxt:%m-%d %H:%M}")
+            _say(f"未到生成时间，下次: {nxt:%m-%d %H:%M}")
         return 0
 
     _say(f"计划时间 {nxt:%m-%d %H:%M} 已到，启动 worker{'（演示模式）' if dry_run else ''}...")
@@ -83,14 +83,14 @@ def _check_and_run(dry_run: bool, once: bool) -> int:
     nxt2 = compute_next_run(get_settings())
     if nxt2:
         settings_set(schedule_next_run=nxt2.isoformat(timespec="minutes"))
-        _say(f"本次完成（rc={rc}），下次发布: {nxt2:%m-%d %H:%M}")
+        _say(f"本次完成（rc={rc}），下次生成: {nxt2:%m-%d %H:%M}")
     return 0 if rc == 0 else 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="InsAuto schedule watcher")
     parser.add_argument("--once", action="store_true", help="check once and exit")
-    parser.add_argument("--dry-run", action="store_true", help="workers run without posting")
+    parser.add_argument("--dry-run", action="store_true", help="workers generate without saving")
     parser.add_argument("--interval", type=int, default=30, help="check interval in seconds")
     args = parser.parse_args()
 
